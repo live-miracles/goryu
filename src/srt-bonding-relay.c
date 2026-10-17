@@ -136,6 +136,12 @@ typedef struct relay_stream_state {
     int output_snd_buf_ms;
     relay_leg_state_t legs[MAX_GROUP_MEMBERS];
     int leg_count;
+    /* Set once when the session starts. A plain (non-group) input has no legs[]
+     * to carry the encoder's address, so it is reported here instead; for a
+     * bonded group the per-leg addresses in legs[] are authoritative. */
+    int input_bonded;
+    char input_peer_ip[INET6_ADDRSTRLEN];
+    int input_peer_port;
     long long last_stats_at_ms;
     char last_error[LAST_ERROR_MAX];
     long long last_error_at_ms;
@@ -606,6 +612,18 @@ static void remove_stream_state(int slot) {
     pthread_mutex_unlock(&g_sessions_mu);
 }
 
+static void set_stream_input_info(int slot, int bonded, const char *peer_ip, int peer_port) {
+    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
+    pthread_mutex_lock(&g_sessions_mu);
+    g_sessions[slot].state.input_bonded = bonded;
+    if (!bonded) {
+        snprintf(g_sessions[slot].state.input_peer_ip, sizeof g_sessions[slot].state.input_peer_ip,
+                 "%s", peer_ip);
+        g_sessions[slot].state.input_peer_port = peer_port;
+    }
+    pthread_mutex_unlock(&g_sessions_mu);
+}
+
 static void set_stream_output_connected(int slot, int connected) {
     if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
     pthread_mutex_lock(&g_sessions_mu);
@@ -969,6 +987,17 @@ static void write_status_response(int client_fd) {
         json_key(f, &sf, "input");
         fputc('{', f);
         int inf = 1;
+        json_bool(f, &inf, "bonded", s->input_bonded);
+        json_key(f, &inf, "peer");
+        if (s->input_bonded || !s->input_peer_ip[0]) {
+            fputs("null", f);
+        } else {
+            fputc('{', f);
+            int pf = 1;
+            json_str(f, &pf, "ip", s->input_peer_ip);
+            json_int(f, &pf, "port", s->input_peer_port);
+            fputc('}', f);
+        }
         json_ll_opt(f, &inf, "recvPacketsTotal", s->recv_packets_total_valid,
                     s->recv_packets_total);
         json_ll(f, &inf, "recvUniquePacketsTotal", s->recv_unique_packets_total);
@@ -1276,8 +1305,9 @@ static void *session_main(void *arg) {
     }
     set_tracked_session_streamid(tracker_slot, streamid);
 
-    relay_logf("Accepted bonded SRT source peer=%s:%d streamid=%s\n", peer_ip, peer_port,
-               streamid[0] ? streamid : "(empty)");
+    int input_bonded = (conn & SRTGROUP_MASK) != 0;
+    relay_logf("Accepted %s SRT source peer=%s:%d streamid=%s\n", input_bonded ? "bonded" : "plain",
+               peer_ip, peer_port, streamid[0] ? streamid : "(empty)");
     int state_slot = claim_stream_state(streamid, tracker_slot);
     SRTSOCKET srt_out = SRT_INVALID_SOCK;
     long long next_output_retry_at_ms = 0;
@@ -1322,6 +1352,7 @@ static void *session_main(void *arg) {
         goto cleanup;
     }
 
+    set_stream_input_info(state_slot, input_bonded, peer_ip, peer_port);
     srt_out = connect_srt_output_with_retry(cfg, streamid, state_slot, tracker_slot,
                                             &next_output_retry_at_ms);
 
@@ -1578,7 +1609,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    relay_logf("Listening on bonded SRT %s:%d (backlog=%d) -> %s\n", in_host, in_port,
+    relay_logf("Listening on SRT (bonded and plain) %s:%d (backlog=%d) -> %s\n", in_host, in_port,
                LISTEN_BACKLOG, output_uri);
 
     pthread_t status_tid;

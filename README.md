@@ -2,7 +2,10 @@
 
 Standalone SRT bonding ingress relay. It accepts bonded/redundant SRT groups
 on one listener socket and forwards the deduplicated MPEG-TS payload to a
-downstream SRT target.
+downstream SRT target. The same listener also accepts an ordinary single-link
+SRT caller and forwards it the same way; the status API tells the two apart
+(`input.bonded`) and reports the encoder's address for a plain input
+(`input.peer`).
 
 ## Data path
 
@@ -36,7 +39,9 @@ downstream SRT target.
   connect multiple redundant network legs (e.g. two NICs/uplinks) as one SRT
   *socket group*; SRT itself merges and deduplicates packets across legs
   before the relay ever sees them, so the relay always reads one clean
-  MPEG-TS stream per group, not per leg.
+  MPEG-TS stream per group, not per leg. A caller that connects with a single
+  ordinary SRT socket is accepted by the same listener and handled by the same
+  session code, just without legs.
 - **Accept loop.** The main thread polls the listener with `srt_epoll_uwait`.
   Each accepted connection (the first leg of a new group, or a follow-up leg
   joining an existing group in the background) spawns a session thread
@@ -181,6 +186,15 @@ Each `streamStates[]` entry:
 
 `input` fields:
 
+- `bonded`: `true` when the encoder connected as a bonded socket group,
+  `false` for an ordinary single-link SRT connection. Decided once when the
+  session is accepted. A bonded group with only one leg connected is still
+  `bonded: true`.
+- `peer`: `{ "ip", "port" }`, the encoder's address as seen by the relay, for a
+  plain input; `null` for a bonded input, where each leg carries its own
+  address in `legs[]` (the connection that first opened the group may no
+  longer be a member later, so no single peer is reported). A plain input has
+  an empty `legs` array, so `peer` is where its address shows up.
 - `recvPacketsTotal`, `recvUniquePacketsTotal`, and `recvDropTotal`: group-level
   counters from SRT's bonded group socket. `recvPacketsTotal`,
   `recvLossTotal`, and `retransTotal` can be `null`: SRT does not provide a
@@ -261,6 +275,8 @@ readability — the actual response is one compact line):
       "lastPacketAt": 1783569742530,
       "lastInputPacketAt": 1783569742529,
       "input": {
+        "bonded": true,
+        "peer": null,
         "recvPacketsTotal": null,
         "recvUniquePacketsTotal": 22,
         "recvLossTotal": 0,
