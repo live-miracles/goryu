@@ -1,6 +1,6 @@
 FROM ubuntu:22.04
 
-ARG SRT_TAG=v1.5.5
+ARG SRT_TAG=v1.5.6
 ARG RELAY_VERSION=dev
 
 RUN apt-get update -q \

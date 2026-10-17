@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SRT_TAG="${SRT_TAG:-v1.5.5}"
+SRT_TAG="${SRT_TAG:-v1.5.6}"
 IMAGE_TAG="srt-bonding-relay-dev:${SRT_TAG}"
 CONTAINER_NAME="srt-bonding-relay-dev-$$"
 OUT_BIN="${SRT_BONDING_RELAY_PATH:-$REPO_DIR/objs/srt-bonding-relay}"
