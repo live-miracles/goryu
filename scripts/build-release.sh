@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$REPO_DIR/build}"
-OUT_TGZ="$OUT_DIR/srt-bonding-relay-linux-x86_64.tar.gz"
+OUT_TGZ="$OUT_DIR/goryu-linux-x86_64.tar.gz"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
@@ -21,8 +21,8 @@ fi
 mkdir -p "$OUT_DIR"
 
 echo "Building relay release version: $RELAY_VERSION"
-SRT_BONDING_RELAY_PATH="$STAGE/bin/srt-bonding-relay" \
-SRT_BONDING_RELAY_LIB_DIR="$STAGE/lib" \
+GORYU_PATH="$STAGE/bin/goryu" \
+GORYU_LIB_DIR="$STAGE/lib" \
     bash "$REPO_DIR/scripts/build-local.sh"
 
 tar -C "$STAGE" -czf "$OUT_TGZ" bin lib

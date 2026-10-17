@@ -3,10 +3,10 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRT_TAG="${SRT_TAG:-v1.5.6}"
-IMAGE_TAG="srt-bonding-relay-dev:${SRT_TAG}"
-CONTAINER_NAME="srt-bonding-relay-dev-$$"
-OUT_BIN="${SRT_BONDING_RELAY_PATH:-$REPO_DIR/objs/srt-bonding-relay}"
-OUT_LIB_DIR="${SRT_BONDING_RELAY_LIB_DIR:-$REPO_DIR/objs/lib}"
+IMAGE_TAG="goryu-dev:${SRT_TAG}"
+CONTAINER_NAME="goryu-dev-$$"
+OUT_BIN="${GORYU_PATH:-$REPO_DIR/objs/goryu}"
+OUT_LIB_DIR="${GORYU_LIB_DIR:-$REPO_DIR/objs/lib}"
 SOURCE_SHA="$(find "$REPO_DIR/src" -type f \( -name '*.c' -o -name '*.h' \) -print0 \
     | sort -z \
     | xargs -0 sha256sum \
@@ -25,7 +25,7 @@ if [[ -z "$RELAY_VERSION" ]]; then
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
-    echo "ERROR: Docker is required to build srt-bonding-relay locally." >&2
+    echo "ERROR: Docker is required to build goryu locally." >&2
     exit 1
 fi
 
@@ -42,7 +42,7 @@ docker build \
     --build-arg "RELAY_VERSION=$RELAY_VERSION" \
     --build-arg "RELAY_SOURCE_SHA=$SOURCE_SHA" \
     -t "$IMAGE_TAG" \
-    -f "$REPO_DIR/scripts/srt-bonding-relay.Dockerfile" \
+    -f "$REPO_DIR/scripts/goryu.Dockerfile" \
     "$REPO_DIR"
 
 echo "[relay-build] extracting relay package"
@@ -51,7 +51,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"; cleanup' EXIT
 docker cp "$CONTAINER_NAME:/package/." - | tar -C "$STAGE" -x
 
-install -m 755 "$STAGE/bin/srt-bonding-relay" "$OUT_BIN"
+install -m 755 "$STAGE/bin/goryu" "$OUT_BIN"
 install -d -m 755 "$OUT_LIB_DIR"
 if [[ -d "$STAGE/lib" ]]; then
     install -m 755 "$STAGE"/lib/* "$OUT_LIB_DIR"/

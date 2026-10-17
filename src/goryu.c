@@ -1,5 +1,5 @@
 /*
- * srt-bonding-relay.c
+ * goryu.c
  *
  * Long-running SRT bonding ingress relay.
  *
@@ -10,8 +10,8 @@
  * logical streams.
  *
  * Usage:
- *   srt-bonding-relay <config.json>
- *   srt-bonding-relay <srt-input-uri> <srt-output-uri>
+ *   goryu <config.json>
+ *   goryu <srt-input-uri> <srt-output-uri>
  *
  * Example JSON:
  *   {

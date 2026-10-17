@@ -26,14 +26,14 @@ WORKDIR /src/app
 ARG RELAY_SOURCE_SHA=dev
 RUN printf '%s\n' "$RELAY_SOURCE_SHA" > /tmp/relay-source.sha
 COPY src/ ./src/
-RUN g++ -O2 -DRELAY_VERSION=\"${RELAY_VERSION}\" -o srt-bonding-relay src/*.c \
+RUN g++ -O2 -DRELAY_VERSION=\"${RELAY_VERSION}\" -o goryu src/*.c \
     $(pkg-config --cflags --libs srt) -lpthread -lssl -lcrypto -lm
 
 RUN set -eux; \
     stage=/package; \
     mkdir -p "$stage/bin" "$stage/lib"; \
-    install -m 755 srt-bonding-relay "$stage/bin/srt-bonding-relay"; \
-    ldd "$stage/bin/srt-bonding-relay" | awk '/=> \// {print $3}' | while read -r lib; do \
+    install -m 755 goryu "$stage/bin/goryu"; \
+    ldd "$stage/bin/goryu" | awk '/=> \// {print $3}' | while read -r lib; do \
         case "$lib" in \
             /lib/*/libc.so.*|/lib/*/libpthread.so.*|/lib/*/libm.so.*|/lib/*/libdl.so.*|/lib/*/ld-linux-*.so.*) ;; \
             *) cp -v "$lib" "$stage/lib/" ;; \

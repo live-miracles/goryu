@@ -2,12 +2,12 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${SRT_BONDING_RELAY_PATH:-$REPO_DIR/objs/srt-bonding-relay}"
-LIB_DIR="${SRT_BONDING_RELAY_LIB_DIR:-$REPO_DIR/objs/lib}"
-CONFIG_PATH="${SRT_BONDING_RELAY_CONFIG_PATH:-$REPO_DIR/srt-bonding-relay.json}"
+BIN="${GORYU_PATH:-$REPO_DIR/objs/goryu}"
+LIB_DIR="${GORYU_LIB_DIR:-$REPO_DIR/objs/lib}"
+CONFIG_PATH="${GORYU_CONFIG_PATH:-$REPO_DIR/goryu.json}"
 
 if [[ ! -x "$BIN" ]]; then
-    echo "ERROR: srt-bonding-relay not found or not executable: $BIN" >&2
+    echo "ERROR: goryu not found or not executable: $BIN" >&2
     echo "Run: bash scripts/build-local.sh" >&2
     exit 1
 fi

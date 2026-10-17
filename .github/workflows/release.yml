@@ -34,12 +34,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          asset="build/srt-bonding-relay-linux-x86_64.tar.gz"
+          asset="build/goryu-linux-x86_64.tar.gz"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "$asset" \
               --verify-tag \
-              --title "srt-bonding-relay $GITHUB_REF_NAME" \
+              --title "goryu $GITHUB_REF_NAME" \
               --generate-notes
           fi

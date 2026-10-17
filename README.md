@@ -1,4 +1,4 @@
-# SRT Bonding Relay
+# Goryu
 
 Standalone SRT bonding ingress relay. It accepts bonded/redundant SRT groups
 on one listener socket and forwards the deduplicated MPEG-TS payload to a
@@ -17,7 +17,7 @@ SRT caller and forwards it the same way; the status API tells the two apart
               |
               v
    +-----------------------------+
-   | srt-bonding-relay listener |
+   | goryu listener |
    | SRTO_GROUPCONNECT=1        |
    +-----------------------------+
               |
@@ -88,8 +88,8 @@ SRT caller and forwards it the same way; the status API tells the two apart
 
 The relay accepts either:
 
-- `srt-bonding-relay <config.json>`
-- `srt-bonding-relay <srt-input-uri> <srt-output-uri>`
+- `goryu <config.json>`
+- `goryu <srt-input-uri> <srt-output-uri>`
 
 Minimal JSON config:
 
@@ -365,7 +365,7 @@ bash scripts/build-local.sh
 Check the embedded version:
 
 ```bash
-./objs/srt-bonding-relay --version
+./objs/goryu --version
 ```
 
 Run it:
@@ -409,7 +409,7 @@ bash scripts/build-release.sh
 That produces:
 
 ```text
-build/srt-bonding-relay-linux-x86_64.tar.gz
+build/goryu-linux-x86_64.tar.gz
 ```
 
 Before a release, update `VERSION` first. The binary version is embedded at
@@ -420,7 +420,7 @@ If a release already exists, the workflow replaces the archive asset. To do
 that manually:
 
 ```bash
-gh release upload "$(cat VERSION)" build/srt-bonding-relay-linux-x86_64.tar.gz --clobber
+gh release upload "$(cat VERSION)" build/goryu-linux-x86_64.tar.gz --clobber
 ```
 
 ## CI
@@ -430,5 +430,5 @@ This repo includes a GitHub Actions workflow that:
 - builds the relay with Docker
 - checks C formatting with `clang-format`
 - checks the usage path
-- starts the relay with `srt-bonding-relay.json`
+- starts the relay with `goryu.json`
 - verifies the local HTTP status endpoint responds
