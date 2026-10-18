@@ -1,4 +1,8 @@
+<img src=".github/assets/logo.png" alt="Goryu logo" width="96" align="right" />
+
 # Goryu
+
+_Goryu (合流, "confluence"): many network paths, one stream._
 
 Standalone SRT bonding ingress relay. It accepts bonded/redundant SRT groups
 on one listener socket and forwards the deduplicated MPEG-TS payload to a
