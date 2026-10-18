@@ -4,14 +4,12 @@
 
 _Goryu (合流, "confluence"): many network paths, one stream._
 
-Standalone SRT bonding ingress relay. It accepts bonded/redundant SRT groups
-on one listener socket and forwards the deduplicated MPEG-TS payload to a
-downstream SRT target. The same listener also accepts an ordinary single-link
-SRT caller and forwards it the same way; the status API tells the two apart
-(`input.bonded`) and reports the encoder's address for a plain input
-(`input.peer`).
+[![CI](https://github.com/live-miracles/goryu/actions/workflows/ci.yml/badge.svg)](https://github.com/live-miracles/goryu/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Data path
+**A small SRT bonding relay for Linux.** An encoder sends one stream over several network links (two uplinks, two SIMs) as a bonded SRT group. Goryu accepts the group on one port, merges the legs into a single deduplicated stream, and forwards it to a downstream SRT server. An ordinary single-link SRT caller works on the same port.
+
+Built on [libsrt](https://github.com/Haivision/srt) 1.5.6 socket-group bonding. It is one C binary with a six-field JSON config and a loopback JSON status API, and it is the bonded-SRT ingress for [Bunryu](https://github.com/live-miracles/bunryu).
 
 ```text
         encoder / publisher
@@ -21,8 +19,8 @@ SRT caller and forwards it the same way; the status API tells the two apart
               |
               v
    +-----------------------------+
-   | goryu listener |
-   | SRTO_GROUPCONNECT=1        |
+   | goryu listener              |
+   | SRTO_GROUPCONNECT=1         |
    +-----------------------------+
               |
               | SRT group socket
@@ -36,66 +34,22 @@ SRT caller and forwards it the same way; the status API tells the two apart
               +----> srt:// output, same streamid
 ```
 
-## Design
+## Features
 
-- **Input listener.** A single SRT socket is bound with `SRTO_GROUPCONNECT=1`
-  (`mode=listener`, `transtype=live`, `latency=240ms`). This lets an encoder
-  connect multiple redundant network legs (e.g. two NICs/uplinks) as one SRT
-  *socket group*; SRT itself merges and deduplicates packets across legs
-  before the relay ever sees them, so the relay always reads one clean
-  MPEG-TS stream per group, not per leg. A caller that connects with a single
-  ordinary SRT socket is accepted by the same listener and handled by the same
-  session code, just without legs.
-- **Accept loop.** The main thread polls the listener with `srt_epoll_uwait`.
-  Each accepted connection (the first leg of a new group, or a follow-up leg
-  joining an existing group in the background) spawns a session thread
-  (`session_main`) tracked in a fixed-size session table
-  (`MAX_ACTIVE_SESSIONS` = 256).
-- **Streamid-based routing and dedup.** The caller's SRT `streamid` is read
-  off the accepted socket and used as the key for a shared per-stream state
-  slot. It's also copied verbatim onto the outgoing connection, so one
-  listener can multiplex many logical streams to distinct downstream
-  destinations/streamids. If a second publisher connects with a streamid
-  that's already active, the relay waits up to 5s for the existing session to
-  go quiet; if the existing session has had no input for 5s it's treated as
-  stale and force-closed so the new publisher can take over, otherwise the
-  new connection is rejected as a duplicate.
-- **Forwarding.** Each session thread reads deduplicated payload off the
-  group socket with `srt_recvmsg2` and writes it downstream with
-  `srt_sendmsg2` over the `srt://` output connection. If the downstream SRT
-  target is unreachable or rejects the publish attempt, the session retries
-  with backoff (1s, 2s, 4s, 8s, 16s) in the background without dropping the
-  encoder's input connection. When libsrt exposes a downstream reject reason,
-  it is included in the stream's `lastError`.
-- **Stats collection.** A per-session sampler (`update_stream_srt_counters`,
-  rate-limited to once/sec/session) pulls counters from libsrt
-  (`srt_bstats`, `srt_group_data`) under a lock and writes them into the
-  shared session state. This runs from the session thread itself — the
-  status HTTP thread never touches libsrt directly, it only reads the
-  already-collected state.
-- **Status HTTP server.** A separate thread serves the JSON status snapshot
-  described below on its own port, bound to loopback only.
-- **Bounded logging.** libsrt's own internal log level is set to `LOG_ERR`
-  at startup, so its per-packet diagnostic chatter (e.g. receive-queue
-  pressure warnings under sustained loss/reordering) is never formatted or
-  emitted in the first place. A custom log handler (`srt_log_handler`) is
-  installed as a backstop on top of that: a flat cap of 20 lines/second
-  across the whole process, regardless of level or message, with a one-line
-  "N more suppressed" summary when the cap is hit. This exists because a
-  receive-queue backlog once produced ~35 log lines/sec for 16 minutes,
-  which was enough CPU/IO load on a small host to starve `systemd-journald`
-  and take the whole machine's SSH/networking down with it — the cap makes
-  that failure mode structurally impossible regardless of what triggers a
-  future logging burst.
+- [Bonded and plain SRT](docs/1-getting-started/1-introduction.md) on one listener; the status API tells them apart.
+- [Streamid passthrough](docs/2-usage/1-configuration.md#streamid-routing): one listener serves many streams, each forwarded under its own streamid.
+- [Passphrase](docs/2-usage/1-configuration.md#passphrase) applied to the input and the downstream connection.
+- [Per-leg telemetry](docs/4-reference/1-status-api.md): RTT, loss, latency, bandwidth and buffer occupancy for every leg, plus the output connection.
+- [Built to stay up](docs/3-operations/1-reliability.md): bounded retry with backoff to the downstream, takeover of a stale publisher, and a hard cap on log volume.
 
-## Config
+## Quick start
 
-The relay accepts either:
+```bash
+curl -fsSL -o goryu.tar.gz https://github.com/live-miracles/goryu/releases/latest/download/goryu-linux-x86_64.tar.gz
+mkdir goryu && tar -xzf goryu.tar.gz -C goryu && cd goryu
+```
 
-- `goryu <config.json>`
-- `goryu <srt-input-uri> <srt-output-uri>`
-
-Minimal JSON config:
+Create `goryu.json` (the downstream must be an SRT server that accepts the publish):
 
 ```json
 {
@@ -104,335 +58,26 @@ Minimal JSON config:
   "output_host": "127.0.0.1",
   "output_port": 10080,
   "status_port": 8081,
-  "passphrase": "secret-value"
+  "passphrase": ""
 }
 ```
 
-Fields:
-
-- `input_host`: bonded SRT listener host/interface
-- `input_port`: bonded SRT listener port
-- `output_host`: downstream SRT publish host
-- `output_port`: downstream SRT publish port
-- `status_port`: local HTTP status endpoint port
-- `passphrase`: SRT passphrase applied to the input and to the `srt://` output.
-  Use `""` to disable encryption.
-
-The relay is streamid-agnostic. It accepts any incoming `streamid` and copies it
-to the downstream SRT publish socket automatically.
-
-All config fields are required.
-
-## Passphrase handling
-
-When `passphrase` is set, the relay configures `SRTO_PASSPHRASE` on the input
-listener and output connection, then leaves passphrase validation to libsrt's
-default encrypted-handshake handling.
-
-Bad-passphrase callers are rejected by libsrt during the handshake, before
-`srt_accept()` returns a connected socket to the relay. That means the relay
-does not get a peer address for those failed attempts and does not emit a
-relay-owned, fail2ban-ready bad-passphrase log line. Depending on libsrt's
-runtime logging, journald may still capture internal SRT error messages for
-failed handshakes, but they should be treated as diagnostic noise rather than
-a stable security log format.
-
-## Status / Stats HTTP API
-
-The status thread listens on `127.0.0.1:<status_port>` (loopback only, not
-reachable from other hosts) and returns a JSON snapshot of every active or
-recently-active stream on any request, e.g.:
+Run it, then check it is up:
 
 ```bash
+LD_LIBRARY_PATH=lib ./bin/goryu goryu.json
 curl http://127.0.0.1:8081/status
 ```
 
-```text
-status HTTP thread
-        |
-        v
-copies in-memory session state
-        |
-        +--> never calls libsrt directly
-        |
-        v
-JSON response
+Point the encoder at `srt://<host>:10081` with a `streamid`. See [Install](docs/1-getting-started/2-install.md) for running it under systemd and the firewall port, and [Configuration](docs/2-usage/1-configuration.md) for every field.
 
-session threads
-        |
-        +--> sample srt_bstats() / srt_group_data() at most once per second
-        |
-        v
-shared session state
-```
+## Documentation
 
-The response body itself is compact (no pretty-printing) since nothing
-requires this JSON to be human-formatted — pipe it through `jq`/`python3 -m
-json.tool` if you want to read it by eye.
+- **Getting started:** [Introduction](docs/1-getting-started/1-introduction.md) · [Install](docs/1-getting-started/2-install.md)
+- **Usage:** [Configuration](docs/2-usage/1-configuration.md)
+- **Operations:** [Reliability](docs/3-operations/1-reliability.md)
+- **Reference:** [Status API](docs/4-reference/1-status-api.md) · [Architecture](docs/4-reference/2-architecture.md) · [Development](docs/4-reference/3-development.md)
 
-Top-level fields:
+## License
 
-- `pid`, `startedAtMs`, `updatedAtMs`: process identity and snapshot timing
-- `lastError`: the most recent process-level error, if any
-- `activeStreamIds`: streamids with a currently connected input
-- `streamStates`: one entry per known stream (see below); entries can briefly
-  outlive `activeStreamIds` while a session is tearing down
-
-Each `streamStates[]` entry:
-
-- `streamId`, `inputActive`, `outputConnected`, `retryFailures`
-- `forwardedPackets`, `forwardedBytes`, `lastPacketAt`, `lastInputPacketAt`:
-  relay-tracked forwarding progress
-- `input`: everything SRT reports about the (possibly bonded) input — see below
-- `output`: everything SRT reports about the single downstream connection
-  (output is never bonded) — see below
-- `lastErrorAt`, `lastError`: most recent per-stream error, if any
-
-`input` fields:
-
-- `bonded`: `true` when the encoder connected as a bonded socket group,
-  `false` for an ordinary single-link SRT connection. Decided once when the
-  session is accepted. A bonded group with only one leg connected is still
-  `bonded: true`.
-- `peer`: `{ "ip", "port" }`, the encoder's address as seen by the relay, for a
-  plain input; `null` for a bonded input, where each leg carries its own
-  address in `legs[]` (the connection that first opened the group may no
-  longer be a member later, so no single peer is reported). A plain input has
-  an empty `legs` array, so `peer` is where its address shows up.
-- `recvPacketsTotal`, `recvUniquePacketsTotal`, and `recvDropTotal`: group-level
-  counters from SRT's bonded group socket. `recvPacketsTotal`,
-  `recvLossTotal`, and `retransTotal` can be `null`: SRT does not provide a
-  deduplicated group-level loss or receive-retransmission counter, and it does
-  not always populate `recvPacketsTotal` for a group. `recvUniquePacketsTotal`
-  is the reliable deduplicated total for group-level throughput. Use the
-  per-leg values below for loss and retransmission telemetry; the relay does
-  not sum them because that would double-count packets recovered on another
-  leg.
-- `rttMs`: RTT reported for the input group socket as a whole
-- `latencyMs`: negotiated SRT buffering latency for the input, i.e. the
-  actual value SRT settled on after the handshake, not just what was
-  requested. For a non-bonded input this comes straight from `srt_bstats`
-  (`msRcvTsbPdDelay`, the same underlying value `SRTO_LATENCY` reports). A
-  bonded group socket's own `srt_bstats` never fills that field in, so for a
-  real bonded input this is derived as the max `latencyMs` across `legs[]`
-  instead (see below) — no extra libsrt call needed either way.
-- `bandwidthMbps`, `recvRateMbps`, `belatedTotal`, `belatedAvgMs`,
-  `undecryptTotal`, `reorderDistance`, `rcvBufMs`: estimated capacity, actual
-  receive rate, packets dropped for arriving past their delivery deadline
-  (count + average lateness), decryption failures, reordering, and
-  receive-buffer occupancy (ms) — all read straight from the same
-  `srt_bstats` call as the fields above. **Only populated for a non-bonded
-  input** (`null` otherwise): like `latencyMs`, a bonded group's own
-  `srt_bstats` never fills these in, and there was no reasonable per-leg
-  aggregation for most of them (unlike latency, where "max across legs" has
-  a clear meaning) — check `legs[]` for the real per-leg numbers on a bonded
-  stream instead.
-- `legs`: one entry per individual bonded connection currently in (or
-  recently in) the input group, read directly from `srt_group_data()` +
-  `srt_bstats()` on each member socket — this is real per-leg telemetry from
-  libsrt, not something the relay derives or combines:
-  - `ip`, `port`: the leg's peer (encoder-side) address, as seen by the relay
-  - `state`: `pending` | `idle` | `running` | `broken`
-  - `rttMs`, `recvPacketsTotal`, `recvUniquePacketsTotal`, `recvLossTotal`,
-    `recvDropTotal`, `retransTotal`: stats for that leg only
-  - `latencyMs`: the negotiated latency for that individual leg's own socket
-    (`msRcvTsbPdDelay` from the member's own `srt_bstats`, not the group), so
-    if an encoder ever negotiates a different value per leg it's visible here
-  - `bandwidthMbps`, `recvRateMbps`, `belatedTotal`, `belatedAvgMs`,
-    `undecryptTotal`, `reorderDistance`, `rcvBufMs`: the same set of extra
-    stats as `input.*` above, but for that leg's own socket specifically —
-    reliably populated per leg even though the group-level `input.*`
-    versions are not
-
-`output` fields:
-
-- `sentPacketsTotal`, `sendLossTotal`, `sendDropTotal`, `retransTotal`:
-  send-side counters for the downstream connection
-- `rttMs`: RTT for the downstream connection
-- `latencyMs`: negotiated latency on the downstream `srt://` connection the
-  relay makes to the output (from `srt_bstats`' `msRcvTsbPdDelay`, same value
-  as `input.latencyMs`); the relay's default `build_srt_uri()` requests
-  `latency=200` here vs. `latency=240` on the bonded input listener
-- `bandwidthMbps`, `sendRateMbps`, `undecryptTotal`, `sndBufMs`: capacity,
-  actual send rate, decryption failures, and send-buffer occupancy (ms) —
-  the output socket is never a group, so these are populated after the first
-  successful output stats sample while connected
-
-Example response for a stream bonded over two legs (reformatted here for
-readability — the actual response is one compact line):
-
-```json
-{
-  "pid": 12345,
-  "startedAtMs": 1783569708552,
-  "updatedAtMs": 1783569763437,
-  "lastError": null,
-  "activeStreamIds": ["camera1/main"],
-  "streamStates": [
-    {
-      "streamId": "camera1/main",
-      "inputActive": true,
-      "outputConnected": true,
-      "retryFailures": 0,
-      "forwardedPackets": 28,
-      "forwardedBytes": 36848,
-      "lastPacketAt": 1783569742530,
-      "lastInputPacketAt": 1783569742529,
-      "input": {
-        "bonded": true,
-        "peer": null,
-        "recvPacketsTotal": null,
-        "recvUniquePacketsTotal": 22,
-        "recvLossTotal": 0,
-        "recvDropTotal": 0,
-        "retransTotal": 0,
-        "rttMs": null,
-        "latencyMs": 240,
-        "bandwidthMbps": null,
-        "recvRateMbps": null,
-        "belatedTotal": null,
-        "belatedAvgMs": null,
-        "undecryptTotal": null,
-        "reorderDistance": null,
-        "rcvBufMs": null,
-        "legs": [
-          {
-            "ip": "10.0.1.20",
-            "port": 51072,
-            "state": "running",
-            "rttMs": 24.6,
-            "latencyMs": 240,
-            "recvPacketsTotal": 26,
-            "recvUniquePacketsTotal": 26,
-            "recvLossTotal": 0,
-            "recvDropTotal": 0,
-            "retransTotal": 0,
-            "bandwidthMbps": 12.3,
-            "recvRateMbps": 0.47,
-            "belatedTotal": 0,
-            "belatedAvgMs": 0.0,
-            "undecryptTotal": 0,
-            "reorderDistance": 0,
-            "rcvBufMs": 221
-          },
-          {
-            "ip": "10.0.2.31",
-            "port": 39356,
-            "state": "running",
-            "rttMs": 31.2,
-            "latencyMs": 240,
-            "recvPacketsTotal": 25,
-            "recvUniquePacketsTotal": 25,
-            "recvLossTotal": 1,
-            "recvDropTotal": 0,
-            "retransTotal": 0,
-            "bandwidthMbps": 9.8,
-            "recvRateMbps": 0.46,
-            "belatedTotal": 2,
-            "belatedAvgMs": 6.4,
-            "undecryptTotal": 0,
-            "reorderDistance": 1,
-            "rcvBufMs": 235
-          }
-        ]
-      },
-      "output": {
-        "sentPacketsTotal": 21,
-        "sendLossTotal": 0,
-        "sendDropTotal": 0,
-        "retransTotal": 0,
-        "rttMs": 0.043,
-        "latencyMs": 200,
-        "bandwidthMbps": 11.8,
-        "sendRateMbps": 0.42,
-        "undecryptTotal": 0,
-        "sndBufMs": 1
-      },
-      "lastErrorAt": 0,
-      "lastError": null
-    }
-  ]
-}
-```
-
-## Versioning
-
-The relay version is stored in the repo's `VERSION` file and embedded into the
-binary at build time.
-
-## Local Build
-
-```bash
-bash scripts/build-local.sh
-```
-
-Check the embedded version:
-
-```bash
-./objs/goryu --version
-```
-
-Run it:
-
-```bash
-bash scripts/run.sh
-```
-
-Smoke test it locally:
-
-```bash
-bash scripts/smoke-test.sh
-```
-
-Format C sources:
-
-```bash
-bash scripts/format.sh
-```
-
-## GitHub Releases
-
-Releases are published automatically when a tag matching `VERSION` is pushed.
-For example, after updating `VERSION` to `v3.0.3` and committing it:
-
-```bash
-git tag v3.0.3
-git push origin master v3.0.3
-```
-
-The release workflow validates that the tag matches `VERSION`, builds the
-Linux archive with Docker, and creates the GitHub Release with generated notes.
-It requires the tag to use the same `vX.Y.Z` value as `VERSION`.
-
-To build the release asset locally instead:
-
-```bash
-bash scripts/build-release.sh
-```
-
-That produces:
-
-```text
-build/goryu-linux-x86_64.tar.gz
-```
-
-Before a release, update `VERSION` first. The binary version is embedded at
-build time, so changing `VERSION` after the asset is built will not update the
-already-built archive.
-
-If a release already exists, the workflow replaces the archive asset. To do
-that manually:
-
-```bash
-gh release upload "$(cat VERSION)" build/goryu-linux-x86_64.tar.gz --clobber
-```
-
-## CI
-
-This repo includes a GitHub Actions workflow that:
-
-- builds the relay with Docker
-- checks C formatting with `clang-format`
-- checks the usage path
-- starts the relay with `goryu.json`
-- verifies the local HTTP status endpoint responds
+[MIT](LICENSE). libsrt and OpenSSL are separate projects under their own licenses.
