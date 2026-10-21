@@ -230,9 +230,8 @@ static void set_tracked_session_streamid(int slot, const char *streamid) {
     if (g_sessions[slot].active.in_use) {
         g_sessions[slot].active.streamid[0] = '\0';
         if (streamid) {
-            strncpy(g_sessions[slot].active.streamid, streamid,
-                    sizeof g_sessions[slot].active.streamid - 1);
-            g_sessions[slot].active.streamid[sizeof g_sessions[slot].active.streamid - 1] = '\0';
+            snprintf(g_sessions[slot].active.streamid, sizeof g_sessions[slot].active.streamid,
+                     "%s", streamid);
         }
     }
     pthread_mutex_unlock(&g_session_threads_mu);
@@ -888,11 +887,6 @@ static void json_ll(FILE *f, int *first, const char *key, long long val) {
 static void json_int(FILE *f, int *first, const char *key, int val) {
     json_key(f, first, key);
     fprintf(f, "%d", val);
-}
-
-static void json_dbl(FILE *f, int *first, const char *key, double val) {
-    json_key(f, first, key);
-    fprintf(f, "%.3f", val);
 }
 
 static void json_ll_opt(FILE *f, int *first, const char *key, int valid, long long val) {
@@ -1554,7 +1548,7 @@ int main(int argc, char *argv[]) {
 
     relay_config_t cfg;
     memset(&cfg, 0, sizeof cfg);
-    strncpy(cfg.out_query, out_query, sizeof cfg.out_query - 1);
+    snprintf(cfg.out_query, sizeof cfg.out_query, "%s", out_query);
 
     if (resolve_output(out_host, out_port, &cfg) < 0) return 1;
     const char *status_port = getenv("SRT_BONDING_STATUS_PORT");

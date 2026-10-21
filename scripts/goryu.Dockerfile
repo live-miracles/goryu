@@ -31,7 +31,7 @@ WORKDIR /src/app
 ARG RELAY_SOURCE_SHA=dev
 RUN printf '%s\n' "$RELAY_SOURCE_SHA" > /tmp/relay-source.sha
 COPY src/ ./src/
-RUN g++ -O2 -DRELAY_VERSION=\"${RELAY_VERSION}\" -o goryu src/*.c \
+RUN g++ -O2 -Wall -Wextra -DRELAY_VERSION=\"${RELAY_VERSION}\" -o goryu src/*.c \
     $(pkg-config --cflags --libs srt) -lpthread -lssl -lcrypto -lm
 
 RUN set -eux; \
