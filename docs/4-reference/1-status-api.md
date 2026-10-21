@@ -73,12 +73,17 @@ Each `streamStates[]` entry:
   aggregation for most of them (unlike latency, where "max across legs" has
   a clear meaning) — check `legs[]` for the real per-leg numbers on a bonded
   stream instead.
-- `legs`: one entry per individual bonded connection currently in (or
-  recently in) the input group, read directly from `srt_group_data()` +
+- `legs`: one entry per individual bonded connection currently in the input
+  group, read directly from `srt_group_data()` +
   `srt_bstats()` on each member socket — this is real per-leg telemetry from
   libsrt, not something Goryu derives or combines:
   - `ip`, `port`: the leg's peer (encoder-side) address, as seen by Goryu
-  - `state`: `pending` | `idle` | `running` | `broken`
+  - `state`: `pending` | `idle` | `running`. A failed leg is not reported as
+    `broken`: Goryu leaves broken members out of `legs[]`, and when a link was
+    unplugged during testing, libsrt removed the dead leg from the group within
+    the one-second sampling interval anyway. A leg that goes down simply
+    disappears from the list, so detect it by comparing `legs[]` with the legs
+    you have seen before.
   - `rttMs`, `recvPacketsTotal`, `recvUniquePacketsTotal`, `recvLossTotal`,
     `recvDropTotal`, `retransTotal`: stats for that leg only
   - `latencyMs`: the negotiated latency for that individual leg's own socket
