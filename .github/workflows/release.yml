@@ -23,7 +23,7 @@ jobs:
       attestations: write
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate version tag
         shell: bash
