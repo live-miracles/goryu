@@ -48,21 +48,32 @@ git tag v3.2.1
 git push origin master v3.2.1
 ```
 
-The release workflow (`.github/workflows/release.yml`) fails if the tag and
-`VERSION` differ, builds the archive with Docker, and creates the GitHub Release
-with generated notes. If the release already exists it replaces the archive.
+The release workflow (`.github/workflows/release.yml`) runs the CI jobs first,
+then fails if the tag and `VERSION` differ, builds the archive with Docker,
+attests its build provenance, and creates the GitHub Release with generated
+notes. The release carries the archive and `checksums.sha256`.
+
+A published release is never overwritten: if the release already exists the
+workflow fails. Fix forward with a new version.
 
 To build the archive locally:
 
 ```bash
-bash scripts/build-release.sh   # writes build/goryu-linux-x86_64.tar.gz
+bash scripts/build-release.sh   # writes build/goryu-linux-x86_64.tar.gz and build/checksums.sha256
 ```
 
-To replace the asset on an existing release by hand:
+### Pinned build inputs
 
-```bash
-gh release upload "$(cat VERSION)" build/goryu-linux-x86_64.tar.gz --clobber
-```
+`scripts/goryu.Dockerfile` pins the base image by digest and checks that the
+libsrt tag resolves to a known commit, so a moved tag fails the build instead of
+changing what ships. To update either one:
+
+- Base image: `docker buildx imagetools inspect ubuntu:22.04`, then copy the
+  top-level `Digest:` into the `FROM` line.
+- libsrt: `git ls-remote https://github.com/Haivision/srt 'refs/tags/vX.Y.Z'`,
+  then set `SRT_TAG` and `SRT_COMMIT` in the Dockerfile and `SRT_TAG` in
+  `scripts/build-local.sh`. To try another version locally without editing
+  files, set both `SRT_TAG` and `SRT_COMMIT` in the environment.
 
 Projects that pin a Goryu release (such as Bunryu's installer and Docker image)
 download `goryu-linux-x86_64.tar.gz` from the release, so the asset name is part

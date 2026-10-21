@@ -12,6 +12,10 @@ curl -fsSL -o goryu.tar.gz https://github.com/live-miracles/goryu/releases/lates
 mkdir goryu && tar -xzf goryu.tar.gz -C goryu
 ```
 
+Each release also publishes `checksums.sha256`. To verify a download, fetch it
+next to the archive and run `sha256sum --check checksums.sha256`, or check the
+build attestation with `gh attestation verify goryu.tar.gz --repo live-miracles/goryu`.
+
 The archive unpacks to `bin/goryu` and `lib/`. To pin a version, replace
 `latest/download` with `download/vX.Y.Z`. Check what you have with:
 

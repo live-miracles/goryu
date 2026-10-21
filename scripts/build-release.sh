@@ -27,6 +27,9 @@ GORYU_LIB_DIR="$STAGE/lib" \
 
 tar -C "$STAGE" -czf "$OUT_TGZ" bin lib
 
+# Relative file name, so users can run `sha256sum --check checksums.sha256`.
+(cd "$OUT_DIR" && sha256sum "$(basename "$OUT_TGZ")" > checksums.sha256)
+
 echo "Asset: $OUT_TGZ"
 echo "SHA256:"
-sha256sum "$OUT_TGZ" | awk '{print $1 "  " $2}'
+cat "$OUT_DIR/checksums.sha256"

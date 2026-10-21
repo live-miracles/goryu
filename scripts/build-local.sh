@@ -37,8 +37,15 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[relay-build] building Docker image $IMAGE_TAG version=$RELAY_VERSION"
+# SRT_COMMIT defaults to the pin in the Dockerfile; set it together with SRT_TAG
+# to build another libsrt version.
+srt_commit_args=()
+if [[ -n "${SRT_COMMIT:-}" ]]; then
+    srt_commit_args=(--build-arg "SRT_COMMIT=$SRT_COMMIT")
+fi
 docker build \
     --build-arg "SRT_TAG=$SRT_TAG" \
+    "${srt_commit_args[@]}" \
     --build-arg "RELAY_VERSION=$RELAY_VERSION" \
     --build-arg "RELAY_SOURCE_SHA=$SOURCE_SHA" \
     -t "$IMAGE_TAG" \
