@@ -14,6 +14,12 @@
  *                 [--drop-leg INDEX --drop-after SECONDS]
  *                 [--add-local IP --add-after SECONDS]
  *                 [--flap-leg INDEX --flap-interval SECONDS --flap-toggles N]
+ *                 [--type broadcast|backup] [--weights W,W,...]
+ *
+ * --type backup sends a main/backup group: the leg with the highest weight (from
+ * --weights, one per leg in --locals order) carries the stream and the others stay
+ * idle until it becomes unstable. The default is broadcast, where every leg carries
+ * everything.
  *
  * --flap-leg closes the leg, then reconnects it, then closes it again, every
  * --flap-interval seconds, N times in all: a link that keeps going up and down.
@@ -71,6 +77,8 @@ int main(int argc, char **argv) {
     int flap_leg = -1;
     double flap_interval = 1.5;
     int flap_toggles = 0;
+    const char *type = "broadcast";
+    const char *weights = "";
 
     for (int i = 1; i + 1 < argc; i += 2) {
         const char *k = argv[i];
@@ -101,6 +109,10 @@ int main(int argc, char **argv) {
             flap_interval = atof(v);
         else if (!strcmp(k, "--flap-toggles"))
             flap_toggles = atoi(v);
+        else if (!strcmp(k, "--type"))
+            type = v;
+        else if (!strcmp(k, "--weights"))
+            weights = v;
         else {
             fprintf(stderr, "bonded_caller: unknown option %s\n", k);
             return 2;
@@ -112,7 +124,12 @@ int main(int argc, char **argv) {
     }
 
     srt_startup();
-    SRTSOCKET group = srt_create_group(SRT_GTYPE_BROADCAST);
+    if (strcmp(type, "broadcast") != 0 && strcmp(type, "backup") != 0) {
+        fprintf(stderr, "bonded_caller: --type must be broadcast or backup\n");
+        return 2;
+    }
+    SRTSOCKET group =
+        srt_create_group(strcmp(type, "backup") == 0 ? SRT_GTYPE_BACKUP : SRT_GTYPE_BROADCAST);
     if (group == SRT_INVALID_SOCK) die("srt_create_group");
 
     /* Groups are live-only, so no SRTO_TRANSTYPE (libsrt rejects it on a group). */
@@ -137,6 +154,14 @@ int main(int argc, char **argv) {
         cfg[legs] = srt_prepare_endpoint((struct sockaddr *)&src[legs], (struct sockaddr *)&target,
                                          sizeof target);
         ++legs;
+    }
+    {
+        char wlist[256];
+        snprintf(wlist, sizeof wlist, "%s", weights);
+        int i = 0;
+        for (char *tok = strtok(wlist, ","); tok && i < legs; tok = strtok(NULL, ","), ++i) {
+            cfg[i].weight = (uint16_t)atoi(tok);
+        }
     }
     if (legs == 0) {
         fprintf(stderr, "bonded_caller: --locals needs at least one address\n");
@@ -175,8 +200,10 @@ int main(int argc, char **argv) {
             } else {
                 SRT_SOCKGROUPCONFIG again = srt_prepare_endpoint(
                     (struct sockaddr *)&src[flap_leg], (struct sockaddr *)&target, sizeof target);
+                again.weight = cfg[flap_leg].weight;
                 if (srt_connect_group(group, &again, 1) == SRT_ERROR) die("flap reconnect");
                 cfg[flap_leg].id = again.id;
+                cfg[flap_leg].weight = again.weight;
                 flap_leg_up = 1;
             }
             ++flap_done;

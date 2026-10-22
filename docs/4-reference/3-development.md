@@ -39,17 +39,19 @@ a `streamStates` field and the pid of the process it started.
   `jq` and `ss` (plus Docker for the bonded caller), and take about three minutes.
   Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
   duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
-  bonded_legs bonded_flap bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
+  bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
   bonded_abrupt_end`.
 - **Bonded input is simulated.** ffmpeg cannot open a socket group, so
   `tests/e2e/bonded_caller.c` does: a small libsrt caller that reads MPEG-TS from
-  stdin and sends it as a broadcast group with one leg per `--locals` address. Legs
+  stdin and sends it as a broadcast group (or a main/backup one, `--type backup
+  --weights 10,5`) with one leg per `--locals` address. Legs
   bound to `127.0.0.1` and `127.0.0.2` look like two links to the relay, and the
   caller can drop a leg or add one later. The scenarios `bonded*` check the legs in
   the status API, deduplication (each packet forwarded once, not once per leg), a
   single-leg and a late-joining group, a dropped leg, duplicates and stale takeover,
-  passphrase, SIGTERM, a vanished caller and a flapping leg (`bonded_flap`: its join and
-  leave log lines are limited, then summarised); `churn` repeats connect/disconnect
+  passphrase, SIGTERM, a vanished caller, a main/backup group (`bonded_backup`: the standby
+  is idle and takes over when the main leg is closed) and a flapping leg (`bonded_flap`:
+  its join and leave log lines are limited, then summarised); `churn` repeats connect/disconnect
   and checks that file descriptors and threads do not grow. The caller is built once
   into `objs/bonded-caller` with the Docker image `scripts/build-local.sh` makes;
   `E2E_SKIP_BONDED=1` skips these scenarios. What it cannot do is real network

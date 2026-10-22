@@ -170,12 +170,20 @@ build_bonded_caller() {
 BOND_N=0
 # start_bonded <streamid> [bonded_caller options...]: ffmpeg test pattern piped
 # into a bonded caller; sets PUB_PID to the caller's pid. BOND_SECONDS bounds it.
+# BOND_RATE=4M sends a 720p stream of that bitrate instead of the tiny default one: a
+# main/backup group only settles on a main leg when there is real traffic to judge.
 start_bonded() {
     local sid="$1"; shift
     local fifo="$WORK/bond$((++BOND_N)).fifo"
     mkfifo "$fifo"
-    ffmpeg -nostdin -hide_banner -loglevel error -re -f lavfi -i testsrc=size=160x90:rate=15 \
-        -t "${BOND_SECONDS:-120}" -c:v libx264 -preset ultrafast -tune zerolatency -f mpegts - \
+    local video=(-f lavfi -i testsrc=size=160x90:rate=15)
+    local encode=(-c:v libx264 -preset ultrafast -tune zerolatency)
+    if [[ -n "${BOND_RATE:-}" ]]; then
+        video=(-f lavfi -i testsrc2=size=1280x720:rate=30)
+        encode=(-c:v libx264 -preset ultrafast -tune zerolatency -b:v "$BOND_RATE" -maxrate "$BOND_RATE" -bufsize 1M)
+    fi
+    ffmpeg -nostdin -hide_banner -loglevel error -re "${video[@]}" \
+        -t "${BOND_SECONDS:-120}" "${encode[@]}" -f mpegts - \
         >"$fifo" 2>>"$WORK/pub.log" &
     PIDS+=("$!")
     LD_LIBRARY_PATH="$LIB_DIR" "$BONDED" --port "$IN" --streamid "$sid" "$@" <"$fifo" \
@@ -574,6 +582,34 @@ scenario_shutdown_silent() {
     check "and exits with status 0" test "$rc" -eq 0
 }
 
+scenario_bonded_backup() {
+    ports 21
+    write_config "$WORK/c.json" ""
+    start_sink
+    start_goryu "$WORK/c.json" "$WORK/g.log"
+    # 127.0.0.1 has the higher weight, so it is the main leg; it is closed at 24 s.
+    BOND_SECONDS=45 BOND_RATE=4M start_bonded demo/bk --type backup \
+        --locals 127.0.0.1,127.0.0.2 --weights 10,5 --drop-leg 0 --drop-after 24
+    check "a main/backup group is accepted and forwarded" wait_for 12 active_and_connected demo/bk
+    check "it is reported as bonded with both legs" wait_for 8 leg_count_is demo/bk 2
+    leg_field() { stream_jq demo/bk "[.input.legs[] | select(.ip==\"$1\") | $2][0]"; }
+    check "the main leg (higher weight) carries the stream" wait_for 15 bash -c \
+        "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.1 .state)\" = running ]"
+    check "the backup leg is idle" wait_for 15 bash -c \
+        "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.2 .state)\" = idle ]"
+    check "the idle backup carries no data" bash -c \
+        "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.2 '.recvRateMbps < 0.2')\" = true ]"
+    check "the main leg carries the whole stream" bash -c \
+        "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.1 '.recvRateMbps > 2')\" = true ]"
+    check "bytes keep growing" forwarding demo/bk
+    check "the loss of the main leg is logged" wait_for 30 log_has "Bonded leg left streamid=demo/bk leg=127.0.0.1:[0-9]* legs=1" "$WORK/g.log"
+    check "the backup leg takes over and is now running" wait_for 10 bash -c \
+        "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.2 .state)\" = running ]"
+    check "forwarding continues on the backup leg" forwarding demo/bk
+    check "the downstream never reconnected" field_is demo/bk .retryFailures 0
+    check "and is still connected" field_is demo/bk .outputConnected true
+}
+
 scenario_bonded_flap() {
     ports 19
     write_config "$WORK/c.json" ""
@@ -625,7 +661,7 @@ scenario_churn() {
 # --- run --------------------------------------------------------------------
 
 ALL=(cli bad_config uri_mode output_passphrase forward downstream_down duplicate takeover two_streams passphrase sigterm
-    shutdown_silent churn bonded bonded_legs bonded_flap bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
+    shutdown_silent churn bonded bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
     bonded_abrupt_end)
 SELECTED=("${@:-${ALL[@]}}")
 

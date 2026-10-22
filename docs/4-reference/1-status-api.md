@@ -78,7 +78,10 @@ Each `streamStates[]` entry:
   `srt_bstats()` on each member socket — this is real per-leg telemetry from
   libsrt, not something Goryu derives or combines:
   - `ip`, `port`: the leg's peer (encoder-side) address, as seen by Goryu
-  - `state`: `pending` | `idle` | `running`. A failed leg is not reported as
+  - `state`: `pending` | `idle` | `running`. Every leg of a broadcast group is
+    `running`; the standby leg of a main/backup group is `idle` (it carries nothing,
+    `recvRateMbps` is about 0) until the main leg fails and it becomes `running`. A
+    failed leg is not reported as
     `broken`: Goryu leaves broken members out of `legs[]`, and when a link was
     unplugged during testing, libsrt removed the dead leg from the group within
     the one-second sampling interval anyway. A leg that goes down simply

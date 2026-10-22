@@ -15,7 +15,9 @@ The listener is bound with `SRTO_GROUPCONNECT=1`, so it accepts both kinds of
 caller:
 
 - **Bonded.** The encoder connects two or more redundant legs (for example two
-  NICs or uplinks) as one socket group. libsrt merges and deduplicates the legs
+  NICs or uplinks) as one socket group, either a broadcast group (every leg carries
+  the whole stream) or a main/backup group (one leg carries it, the others stand
+  by); the encoder chooses. libsrt merges and deduplicates the legs
   before Goryu reads anything, so Goryu always reads one clean stream per group.
   A group with a single leg connected is still bonded.
 - **Plain.** A caller using one ordinary SRT socket is accepted by the same
