@@ -1,7 +1,7 @@
 # Architecture
 
-Goryu is one process of about 2,000 lines of C (`src/goryu.c` and a small config
-parser in `src/relay_config.c`) on top of libsrt. It has three kinds of thread.
+Goryu is one process of about 2,600 lines of C on top of libsrt, split into the
+small modules listed [below](#modules). It has three kinds of thread.
 
 ## Threads
 
@@ -14,6 +14,24 @@ parser in `src/relay_config.c`) on top of libsrt. It has three kinds of thread.
   `srt_sendmsg2`, and samples SRT statistics (below).
 - **Status HTTP thread.** Serves the [status API](1-status-api.md) on a
   loopback-only port.
+
+## Modules
+
+| File | Role |
+|---|---|
+| `goryu.c` | Entry point: arguments and config, the listener, the accept loop, shutdown order |
+| `session.c` | One session thread: streamid, [duplicate publishers](../3-operations/1-reliability.md#duplicate-publishers), downstream connect and [retry](../3-operations/1-reliability.md#downstream-retry), the read/send loop |
+| `tracker.c` | The sockets of every live session, so one thread can close another's and the sampler never reads a closed socket |
+| `stream_state.c` | The shared, mutex-protected telemetry per stream, plus the process-level `lastError` |
+| `stats.c` | Reads libsrt's counters for a session into a sample that `stream_state.c` applies |
+| `status_api.c`, `json_out.c` | The loopback HTTP thread and the JSON writers |
+| `relay_config.c` | `goryu.json`, URI and query parsing, passphrase rules, URI redaction |
+| `srt_opts.c` | Applies SRT options from a query and reports a refused one |
+| `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays |
+
+The tracker and the stream state use the same slot index for a session. Both are
+guarded by their own mutex and are never held at the same time, except that the
+stats sampler holds the tracker's while it calls libsrt.
 
 ## Listener
 
@@ -73,4 +91,7 @@ derives the input latency from the legs; see the
 
 libsrt's log level is set to errors only, and a process-wide handler caps what
 is left at 20 lines per second. See
-[Reliability](../3-operations/1-reliability.md#log-volume) for why.
+[Reliability](../3-operations/1-reliability.md#log-volume) for why. The
+passphrase is never logged: the startup line shows the output URI with
+`passphrase=<redacted>`, and a bad config reports the offending key and the
+passphrase's length, not its value.

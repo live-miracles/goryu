@@ -22,1465 +22,153 @@
  *     "status_port": 8081,
  *     "passphrase": "secret-value"
  *   }
+ *
+ * This file is the entry point: argument and config handling, the listener and
+ * the accept loop. The rest lives in the modules listed in AGENTS.md.
  */
 
 #include <arpa/inet.h>
 #include <errno.h>
-#include <math.h>
-#include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
-#include <signal.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
 #include <sys/socket.h>
-#include <syslog.h>
-#include <time.h>
-#include <unistd.h>
 
 #include <srt/srt.h>
 
+#include "log.h"
+#include "net.h"
 #include "relay_config.h"
+#include "runtime.h"
+#include "session.h"
+#include "srt_opts.h"
+#include "status_api.h"
+#include "stream_state.h"
+#include "tracker.h"
 
-#define CHUNK 1456
 #define LISTEN_BACKLOG 64
 #define MAX_EVENTS 16
-#define MAX_ACTIVE_SESSIONS 256
-#define MAX_GROUP_MEMBERS 16
-#define LAST_ERROR_MAX 512
-#define DUPLICATE_TAKEOVER_WAIT_MS 5000
-#define DUPLICATE_TAKEOVER_STALE_MS 5000
-/* libsrt can expose an uninitialized ~1e16 ms value for this statistic after
- * packet loss. A live SRT packet cannot be belated by anything remotely close
- * to this; keep a conservative upper bound at the relay API boundary. */
-#define MAX_REASONABLE_BELATED_AVG_MS 1000000000.0
 
 #ifndef RELAY_VERSION
 #define RELAY_VERSION "dev"
 #endif
 
 static const char *RELAY_VERSION_STRING = RELAY_VERSION;
-static const int RETRY_DELAYS_MS[] = {1000, 2000, 4000, 8000, 16000};
 
-typedef struct relay_leg_state {
-    char ip[INET6_ADDRSTRLEN];
-    int port;
-    int member_state;
-    int stats_valid;
-    long long recv_packets_total;
-    long long recv_unique_packets_total;
-    int recv_loss_total;
-    int recv_drop_total;
-    int retrans_total;
-    double rtt_ms;
-    int rtt_valid;
-    int latency_ms;
-    int latency_valid;
-    double bandwidth_mbps;
-    double recv_rate_mbps;
-    long long belated_total;
-    double belated_avg_ms;
-    int belated_avg_valid;
-    int undecrypt_total;
-    int reorder_distance;
-    int rcv_buf_ms;
-} relay_leg_state_t;
+typedef struct relay_args {
+    char input_uri[2048];
+    char output_uri[2048];
+    int status_port;
+} relay_args_t;
 
-typedef struct relay_stream_state {
-    char streamid[1024];
-    int input_active;
-    int output_connected;
-    int retry_failures;
-    long long last_input_packet_at_ms;
-    long long forwarded_packets;
-    long long forwarded_bytes;
-    long long last_packet_at_ms;
-    long long recv_packets_total;
-    int recv_packets_total_valid;
-    long long recv_unique_packets_total;
-    int recv_loss_total_valid;
-    int recv_loss_total;
-    int recv_drop_total;
-    int retrans_total_valid;
-    int retrans_total;
-    double input_rtt_ms;
-    int input_rtt_valid;
-    int input_latency_ms;
-    int input_latency_valid;
-    /* Only meaningful for a non-bonded input: CUDTGroup::bstatsSocket() never
-     * populates these for a group socket, so they'd otherwise silently read 0. */
-    int input_extra_stats_valid;
-    double input_bandwidth_mbps;
-    double input_recv_rate_mbps;
-    long long input_belated_total;
-    double input_belated_avg_ms;
-    int input_belated_avg_valid;
-    int input_undecrypt_total;
-    int input_reorder_distance;
-    int input_rcv_buf_ms;
-    double output_rtt_ms;
-    int output_rtt_valid;
-    int output_latency_ms;
-    int output_latency_valid;
-    int output_extra_stats_valid;
-    long long output_sent_packets_total;
-    int output_send_loss_total;
-    int output_send_drop_total;
-    int output_retrans_total;
-    double output_bandwidth_mbps;
-    double output_send_rate_mbps;
-    int output_undecrypt_total;
-    int output_snd_buf_ms;
-    relay_leg_state_t legs[MAX_GROUP_MEMBERS];
-    int leg_count;
-    /* Set once when the session starts. A plain (non-group) input has no legs[]
-     * to carry the encoder's address, so it is reported here instead; for a
-     * bonded group the per-leg addresses in legs[] are authoritative. */
-    int input_bonded;
-    char input_peer_ip[INET6_ADDRSTRLEN];
-    int input_peer_port;
-    long long last_stats_at_ms;
-    char last_error[LAST_ERROR_MAX];
-    long long last_error_at_ms;
-} relay_stream_state_t;
-
-typedef struct active_session {
-    int in_use;
-    char streamid[1024];
-    SRTSOCKET input_sock;
-    SRTSOCKET output_sock;
-} active_session_t;
-
-typedef struct relay_session_slot {
-    relay_stream_state_t state;
-    active_session_t active;
-} relay_session_slot_t;
-
-static volatile sig_atomic_t g_running = 1;
-static pthread_mutex_t g_sessions_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_session_threads_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_session_threads_cond = PTHREAD_COND_INITIALIZER;
-static char g_last_error[512];
-static relay_session_slot_t g_sessions[MAX_ACTIVE_SESSIONS];
-static int g_active_session_threads = 0;
-static long long g_started_at_ms = 0;
-static int g_status_port = 8081;
-
-static void on_signal(int s) {
-    (void)s;
-    g_running = 0;
-}
-
-static int install_signal_handlers(void) {
-    struct sigaction stop_sa;
-    memset(&stop_sa, 0, sizeof stop_sa);
-    stop_sa.sa_handler = on_signal;
-    sigemptyset(&stop_sa.sa_mask);
-
-    if (sigaction(SIGINT, &stop_sa, NULL) < 0) return -1;
-    if (sigaction(SIGTERM, &stop_sa, NULL) < 0) return -1;
-
-    struct sigaction pipe_sa;
-    memset(&pipe_sa, 0, sizeof pipe_sa);
-    pipe_sa.sa_handler = SIG_IGN;
-    sigemptyset(&pipe_sa.sa_mask);
-    if (sigaction(SIGPIPE, &pipe_sa, NULL) < 0) return -1;
-
+/* The two-URI form takes SRT options straight from the query strings, so apply
+ * the same passphrase rule the config file gets. */
+static int check_uri_passphrase(const char *query, const char *which) {
+    char pass[512];
+    char err[256];
+    if (get_param(query, "passphrase", pass, sizeof pass) &&
+        check_passphrase(pass, err, sizeof err) != 0) {
+        relay_logf("Bad %s URI: %s\n", which, err);
+        return -1;
+    }
     return 0;
 }
 
-static void init_session_tracking(void) {
-    pthread_mutex_lock(&g_session_threads_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        memset(&g_sessions[i].active, 0, sizeof g_sessions[i].active);
-        g_sessions[i].active.input_sock = SRT_INVALID_SOCK;
-        g_sessions[i].active.output_sock = SRT_INVALID_SOCK;
-    }
-    g_active_session_threads = 0;
-    pthread_mutex_unlock(&g_session_threads_mu);
-}
+/* Fills args from the command line: either goryu.json or the two URIs. */
+static int read_args(int argc, char *argv[], relay_args_t *args) {
+    args->status_port = 8081;
 
-static int register_session_thread(SRTSOCKET conn) {
-    int slot = -1;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (!g_sessions[i].active.in_use) {
-            slot = i;
-            memset(&g_sessions[i].active, 0, sizeof g_sessions[i].active);
-            g_sessions[i].active.in_use = 1;
-            g_sessions[i].active.input_sock = conn;
-            g_sessions[i].active.output_sock = SRT_INVALID_SOCK;
-            g_active_session_threads++;
-            break;
+    if (argc == 2) {
+        file_config_t file_cfg;
+        char err[256];
+        if (load_config_file(argv[1], &file_cfg, err, sizeof err) < 0) {
+            relay_logf("Bad config file %s: %s\n", argv[1], err);
+            return -1;
         }
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-
-    return slot;
-}
-
-static void set_tracked_session_streamid(int slot, const char *streamid) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    if (g_sessions[slot].active.in_use) {
-        g_sessions[slot].active.streamid[0] = '\0';
-        if (streamid) {
-            snprintf(g_sessions[slot].active.streamid, sizeof g_sessions[slot].active.streamid,
-                     "%s", streamid);
+        if (build_srt_uri(args->input_uri, sizeof args->input_uri, file_cfg.input_host,
+                          file_cfg.input_port, file_cfg.passphrase, 1) != 0 ||
+            build_srt_uri(args->output_uri, sizeof args->output_uri, file_cfg.output_host,
+                          file_cfg.output_port, file_cfg.passphrase, 0) != 0) {
+            relay_logf("Bad config file %s: failed to build SRT URI\n", argv[1]);
+            return -1;
         }
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-}
-
-static void set_tracked_session_output_socket(int slot, SRTSOCKET sock) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    if (g_sessions[slot].active.in_use) {
-        g_sessions[slot].active.output_sock = sock;
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-}
-
-static SRTSOCKET take_tracked_input_socket(int slot, SRTSOCKET expected) {
-    SRTSOCKET sock = SRT_INVALID_SOCK;
-
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return SRT_INVALID_SOCK;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    if (g_sessions[slot].active.in_use && g_sessions[slot].active.input_sock == expected) {
-        sock = g_sessions[slot].active.input_sock;
-        g_sessions[slot].active.input_sock = SRT_INVALID_SOCK;
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-
-    return sock;
-}
-
-static SRTSOCKET take_tracked_output_socket(int slot, SRTSOCKET expected) {
-    SRTSOCKET sock = SRT_INVALID_SOCK;
-
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return SRT_INVALID_SOCK;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    if (g_sessions[slot].active.in_use && g_sessions[slot].active.output_sock == expected) {
-        sock = g_sessions[slot].active.output_sock;
-        g_sessions[slot].active.output_sock = SRT_INVALID_SOCK;
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-
-    return sock;
-}
-
-static int tracked_socket_is_current(int slot, SRTSOCKET input_sock, SRTSOCKET output_sock) {
-    int current = 0;
-
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return 0;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    if (g_sessions[slot].active.in_use &&
-        (input_sock == SRT_INVALID_SOCK || g_sessions[slot].active.input_sock == input_sock) &&
-        (output_sock == SRT_INVALID_SOCK || g_sessions[slot].active.output_sock == output_sock)) {
-        current = 1;
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-
-    return current;
-}
-
-static void close_tracked_sessions_for_streamid(const char *streamid, int except_slot) {
-    SRTSOCKET sockets[MAX_ACTIVE_SESSIONS * 2];
-    int count = 0;
-
-    if (!streamid || !streamid[0]) return;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (!g_sessions[i].active.in_use || i == except_slot) continue;
-        if (strcmp(g_sessions[i].active.streamid, streamid) != 0) continue;
-
-        if (g_sessions[i].active.input_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_sessions[i].active.input_sock;
-            g_sessions[i].active.input_sock = SRT_INVALID_SOCK;
-        }
-        if (g_sessions[i].active.output_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_sessions[i].active.output_sock;
-            g_sessions[i].active.output_sock = SRT_INVALID_SOCK;
-        }
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-
-    for (int i = 0; i < count; ++i) {
-        srt_close(sockets[i]);
-    }
-}
-
-static void unregister_session_thread(int slot) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    if (g_sessions[slot].active.in_use) {
-        memset(&g_sessions[slot].active, 0, sizeof g_sessions[slot].active);
-        g_sessions[slot].active.input_sock = SRT_INVALID_SOCK;
-        g_sessions[slot].active.output_sock = SRT_INVALID_SOCK;
-        if (g_active_session_threads > 0) g_active_session_threads--;
-        pthread_cond_broadcast(&g_session_threads_cond);
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-}
-
-static void close_active_session_sockets(void) {
-    SRTSOCKET sockets[MAX_ACTIVE_SESSIONS * 2];
-    int count = 0;
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (!g_sessions[i].active.in_use) continue;
-        if (g_sessions[i].active.input_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_sessions[i].active.input_sock;
-            g_sessions[i].active.input_sock = SRT_INVALID_SOCK;
-        }
-        if (g_sessions[i].active.output_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_sessions[i].active.output_sock;
-            g_sessions[i].active.output_sock = SRT_INVALID_SOCK;
-        }
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-
-    for (int i = 0; i < count; ++i) {
-        srt_close(sockets[i]);
-    }
-}
-
-static void wait_for_session_threads(void) {
-    pthread_mutex_lock(&g_session_threads_mu);
-    while (g_active_session_threads > 0) {
-        pthread_cond_wait(&g_session_threads_cond, &g_session_threads_mu);
-    }
-    pthread_mutex_unlock(&g_session_threads_mu);
-}
-
-typedef struct relay_config {
-    char out_query[1024];
-    struct sockaddr_storage out_addr;
-    socklen_t out_addrlen;
-} relay_config_t;
-
-typedef struct session_args {
-    SRTSOCKET conn;
-    const relay_config_t *cfg;
-    int tracker_slot;
-    char peer_ip[INET6_ADDRSTRLEN];
-    int peer_port;
-} session_args_t;
-
-static long long now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
-}
-
-/* Prefixes every log line with a local-time, millisecond-precision timestamp
- * (matching SRS's "[2014-05-27 19:21:27.276]" convention) so log output can
- * be correlated during troubleshooting without relying on the process
- * supervisor to stamp it. */
-static void relay_logf(const char *fmt, ...) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    struct tm tm_buf;
-    localtime_r(&ts.tv_sec, &tm_buf);
-    char time_buf[32];
-    strftime(time_buf, sizeof time_buf, "%Y-%m-%d %H:%M:%S", &tm_buf);
-    fprintf(stderr, "[%s.%03ld] ", time_buf, ts.tv_nsec / 1000000);
-
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-}
-
-/* libsrt's own internal logging, capped at the source.
- *
- * Incident (2026-09-29): a receive-queue backlog on a bonded leg made libsrt
- * log "No room to store incoming packet"/"RCV-DROPPED" once per affected
- * packet — ~35 lines/sec sustained for 16 minutes (34k+ lines from that one
- * message class alone). On a small host that log volume alone was enough
- * CPU/IO load to starve systemd-journald, which cascaded into every
- * D-Bus-dependent service (logind, resolved, networkd) going unresponsive —
- * taking SSH and the dashboard down with it, well beyond just this relay.
- *
- * Two layers of defense:
- *  1. srt_setloglevel(LOG_ERR) below stops libsrt from even formatting/
- *     emitting anything at WARNING or below — this is what the incident's
- *     message class was tagged at, so this alone would have prevented it.
- *  2. This handler is a hard backstop for whatever's still allowed through:
- *     a flat cap on total lines per second, regardless of level or message
- *     content, so no future high-volume message class (known or not) can
- *     reproduce the same failure. Excess lines are dropped, not queued —
- *     with a one-line "N more suppressed" summary once the window rolls
- *     over, so the fact that something was noisy is still visible without
- *     the volume itself being the danger. */
-#define SRT_LOG_MAX_LINES_PER_SEC 20
-
-static pthread_mutex_t g_srt_log_mu = PTHREAD_MUTEX_INITIALIZER;
-static long long g_srt_log_window_start_ms = 0;
-static int g_srt_log_count_in_window = 0;
-static long long g_srt_log_suppressed_in_window = 0;
-
-static void srt_log_handler(void *opaque, int level, const char *file, int line, const char *area,
-                            const char *message) {
-    (void)opaque;
-    (void)file;
-    (void)line;
-
-    long long now = now_ms();
-    int emit = 0;
-    long long suppressed_to_report = 0;
-
-    pthread_mutex_lock(&g_srt_log_mu);
-    if (now - g_srt_log_window_start_ms >= 1000) {
-        suppressed_to_report = g_srt_log_suppressed_in_window;
-        g_srt_log_window_start_ms = now;
-        g_srt_log_count_in_window = 0;
-        g_srt_log_suppressed_in_window = 0;
-    }
-    if (g_srt_log_count_in_window < SRT_LOG_MAX_LINES_PER_SEC) {
-        g_srt_log_count_in_window++;
-        emit = 1;
+        args->status_port = file_cfg.status_port;
     } else {
-        g_srt_log_suppressed_in_window++;
+        snprintf(args->input_uri, sizeof args->input_uri, "%s", argv[1]);
+        snprintf(args->output_uri, sizeof args->output_uri, "%s", argv[2]);
     }
-    pthread_mutex_unlock(&g_srt_log_mu);
 
-    if (suppressed_to_report > 0) {
-        relay_logf("srt: %lld more log line(s) suppressed in the last second (rate limit)\n",
-                   suppressed_to_report);
+    const char *status_port = getenv("SRT_BONDING_STATUS_PORT");
+    if (status_port && status_port[0]) {
+        int port = atoi(status_port);
+        if (port > 0 && port <= 65535) args->status_port = port;
     }
-    if (emit) {
-        relay_logf("srt[%d] %s: %s\n", level, area ? area : "?", message ? message : "");
-    }
-}
-
-static void json_write_escaped(FILE *f, const char *s) {
-    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
-        switch (*p) {
-        case '\\':
-            fputs("\\\\", f);
-            break;
-        case '"':
-            fputs("\\\"", f);
-            break;
-        case '\n':
-            fputs("\\n", f);
-            break;
-        case '\r':
-            fputs("\\r", f);
-            break;
-        case '\t':
-            fputs("\\t", f);
-            break;
-        default:
-            if (*p < 0x20) {
-                fprintf(f, "\\u%04x", *p);
-            } else {
-                fputc(*p, f);
-            }
-            break;
-        }
-    }
-}
-
-static void set_last_errorf(const char *fmt, ...) {
-    pthread_mutex_lock(&g_sessions_mu);
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(g_last_error, sizeof g_last_error, fmt, ap);
-    va_end(ap);
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static void set_stream_errorf(int slot, const char *fmt, ...) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-    pthread_mutex_lock(&g_sessions_mu);
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(g_sessions[slot].state.last_error, sizeof g_sessions[slot].state.last_error, fmt, ap);
-    va_end(ap);
-    g_sessions[slot].state.last_error_at_ms = now_ms();
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static long long max_ll(long long a, long long b) {
-    return a > b ? a : b;
-}
-
-static void format_leg_addr(const struct sockaddr_storage *ss, char *ip_out, size_t ip_out_len,
-                            int *port_out) {
-    ip_out[0] = '\0';
-    *port_out = 0;
-    if (ss->ss_family == AF_INET) {
-        const struct sockaddr_in *sin = (const struct sockaddr_in *)ss;
-        inet_ntop(AF_INET, &sin->sin_addr, ip_out, ip_out_len);
-        *port_out = ntohs(sin->sin_port);
-    } else if (ss->ss_family == AF_INET6) {
-        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)ss;
-        inet_ntop(AF_INET6, &sin6->sin6_addr, ip_out, ip_out_len);
-        *port_out = ntohs(sin6->sin6_port);
-    }
-}
-
-static const char *member_state_str(int member_state) {
-    switch (member_state) {
-    case SRT_GST_PENDING:
-        return "pending";
-    case SRT_GST_IDLE:
-        return "idle";
-    case SRT_GST_RUNNING:
-        return "running";
-    case SRT_GST_BROKEN:
-        return "broken";
-    default:
-        return "unknown";
-    }
-}
-
-static int max_int(int a, int b) {
-    return a > b ? a : b;
-}
-
-static int claim_stream_state(const char *streamid, int preferred_slot) {
-    if (!streamid || !streamid[0]) return -1;
-    pthread_mutex_lock(&g_sessions_mu);
-    int slot = -1;
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (g_sessions[i].state.streamid[0] &&
-            strcmp(g_sessions[i].state.streamid, streamid) == 0) {
-            slot = -2;
-            break;
-        }
-    }
-    if (slot == -1) {
-        if (preferred_slot >= 0 && preferred_slot < MAX_ACTIVE_SESSIONS &&
-            !g_sessions[preferred_slot].state.streamid[0]) {
-            slot = preferred_slot;
-        }
-        if (slot >= 0) {
-            memset(&g_sessions[slot].state, 0, sizeof g_sessions[slot].state);
-            strncpy(g_sessions[slot].state.streamid, streamid,
-                    sizeof g_sessions[slot].state.streamid - 1);
-            g_sessions[slot].state.streamid[sizeof g_sessions[slot].state.streamid - 1] = '\0';
-            g_sessions[slot].state.input_active = 1;
-            g_sessions[slot].state.last_input_packet_at_ms = now_ms();
-        }
-    }
-    pthread_mutex_unlock(&g_sessions_mu);
-    return slot;
-}
-
-static int stream_input_age_ms(const char *streamid, long long now, long long *age_ms) {
-    if (!streamid || !streamid[0]) return -1;
-
-    int found = 0;
-    long long last_input_at = 0;
-
-    pthread_mutex_lock(&g_sessions_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (!g_sessions[i].state.streamid[0]) continue;
-        if (strcmp(g_sessions[i].state.streamid, streamid) != 0) continue;
-        found = 1;
-        last_input_at = g_sessions[i].state.last_input_packet_at_ms;
-        break;
-    }
-    pthread_mutex_unlock(&g_sessions_mu);
-
-    if (!found) return -1;
-    if (last_input_at <= 0) last_input_at = now;
-    if (age_ms) *age_ms = now - last_input_at;
     return 0;
 }
 
-static void remove_stream_state(int slot) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-    pthread_mutex_lock(&g_sessions_mu);
-    memset(&g_sessions[slot].state, 0, sizeof g_sessions[slot].state);
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static void set_stream_input_info(int slot, int bonded, const char *peer_ip, int peer_port) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-    pthread_mutex_lock(&g_sessions_mu);
-    g_sessions[slot].state.input_bonded = bonded;
-    if (!bonded) {
-        snprintf(g_sessions[slot].state.input_peer_ip, sizeof g_sessions[slot].state.input_peer_ip,
-                 "%s", peer_ip);
-        g_sessions[slot].state.input_peer_port = peer_port;
-    }
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static void set_stream_output_connected(int slot, int connected) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-    pthread_mutex_lock(&g_sessions_mu);
-    g_sessions[slot].state.output_connected = connected;
-    if (!connected) {
-        g_sessions[slot].state.output_rtt_valid = 0;
-        g_sessions[slot].state.output_latency_valid = 0;
-        g_sessions[slot].state.output_extra_stats_valid = 0;
-    }
-    // Deliberately leave last_error/last_error_at_ms in place on reconnect: a
-    // status poller can easily land after a fast reconnect already cleared it,
-    // hiding a real failure that just happened. last_error is superseded by a
-    // newer set_stream_errorf() call, or reset to empty by claim_stream_state()
-    // when the slot is later reused for a fresh session.
-    if (connected) {
-        g_sessions[slot].state.retry_failures = 0;
-    }
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static void increment_stream_retry_failures(int slot) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-    pthread_mutex_lock(&g_sessions_mu);
-    g_sessions[slot].state.retry_failures++;
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static int get_stream_retry_failures(int slot) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return 0;
-    pthread_mutex_lock(&g_sessions_mu);
-    int failures = g_sessions[slot].state.retry_failures;
-    pthread_mutex_unlock(&g_sessions_mu);
-    return failures;
-}
-
-static int get_retry_delay_ms(int failures) {
-    int idx = failures - 1;
-    if (idx < 0) idx = 0;
-    int max_idx = (int)(sizeof RETRY_DELAYS_MS / sizeof RETRY_DELAYS_MS[0]) - 1;
-    if (idx > max_idx) idx = max_idx;
-    return RETRY_DELAYS_MS[idx];
-}
-
-static int valid_belated_avg_ms(double value) {
-    return isfinite(value) && value >= 0.0 && value <= MAX_REASONABLE_BELATED_AVG_MS;
-}
-
-static void record_stream_input_progress(int slot) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-    pthread_mutex_lock(&g_sessions_mu);
-    g_sessions[slot].state.last_input_packet_at_ms = now_ms();
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static void record_stream_forward_progress(int slot, int bytes) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS || bytes <= 0) return;
-    pthread_mutex_lock(&g_sessions_mu);
-    g_sessions[slot].state.forwarded_packets++;
-    g_sessions[slot].state.forwarded_bytes += bytes;
-    g_sessions[slot].state.last_packet_at_ms = now_ms();
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static void update_stream_srt_counters(int slot, int tracker_slot, SRTSOCKET in_sock,
-                                       SRTSOCKET out_sock, int force) {
-    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
-
-    long long now = now_ms();
-    pthread_mutex_lock(&g_sessions_mu);
-    long long last = g_sessions[slot].state.last_stats_at_ms;
-    pthread_mutex_unlock(&g_sessions_mu);
-    if (!force && last > 0 && now - last < 1000) return;
-
-    SRT_TRACEBSTATS in_stats;
-    memset(&in_stats, 0, sizeof in_stats);
-    int have_in = 0;
-
-    int is_group_sock = in_sock != SRT_INVALID_SOCK && (in_sock & SRTGROUP_MASK);
-    int have_out = 0;
-    SRT_TRACEBSTATS out_stats;
-    memset(&out_stats, 0, sizeof out_stats);
-    relay_leg_state_t legs[MAX_GROUP_MEMBERS];
-    int leg_count = 0;
-    memset(legs, 0, sizeof legs);
-
-    pthread_mutex_lock(&g_session_threads_mu);
-    int tracker_valid = tracker_slot >= 0 && tracker_slot < MAX_ACTIVE_SESSIONS;
-    int can_read_in = tracker_valid && in_sock != SRT_INVALID_SOCK &&
-                      g_sessions[tracker_slot].active.in_use &&
-                      g_sessions[tracker_slot].active.input_sock == in_sock;
-    int can_read_out = tracker_valid && out_sock != SRT_INVALID_SOCK &&
-                       g_sessions[tracker_slot].active.in_use &&
-                       g_sessions[tracker_slot].active.output_sock == out_sock;
-
-    int have_in_latency = 0;
-    int in_latency_ms = 0;
-
-    if (can_read_in) {
-        have_in = srt_bstats(in_sock, &in_stats, 0) != SRT_ERROR;
-
-        if (is_group_sock) {
-            SRT_SOCKGROUPDATA members[MAX_GROUP_MEMBERS];
-            size_t member_count = MAX_GROUP_MEMBERS;
-            memset(members, 0, sizeof members);
-            if (srt_group_data(in_sock, members, &member_count) != SRT_ERROR) {
-                for (size_t i = 0; i < member_count; ++i) {
-                    if (members[i].id == SRT_INVALID_SOCK) continue;
-                    if (members[i].memberstate == SRT_GST_BROKEN) continue;
-
-                    SRT_TRACEBSTATS member_stats;
-                    memset(&member_stats, 0, sizeof member_stats);
-                    int have_member_stats =
-                        srt_bstats(members[i].id, &member_stats, 0) != SRT_ERROR;
-
-                    if (leg_count < MAX_GROUP_MEMBERS) {
-                        relay_leg_state_t *leg = &legs[leg_count++];
-                        format_leg_addr(&members[i].peeraddr, leg->ip, sizeof leg->ip, &leg->port);
-                        leg->member_state = members[i].memberstate;
-                        leg->stats_valid = have_member_stats;
-                        if (have_member_stats) {
-                            /* msRcvTsbPdDelay is the same negotiated latency SRTO_LATENCY
-                             * reports, already present in this bstats call. */
-                            leg->latency_valid = member_stats.msRcvTsbPdDelay > 0;
-                            leg->latency_ms = member_stats.msRcvTsbPdDelay;
-                            leg->rtt_ms = member_stats.msRTT;
-                            leg->rtt_valid = member_stats.msRTT > 0.0;
-                            leg->recv_packets_total = member_stats.pktRecvTotal;
-                            leg->recv_unique_packets_total = member_stats.pktRecvUniqueTotal;
-                            leg->recv_loss_total = member_stats.pktRcvLossTotal;
-                            leg->recv_drop_total = member_stats.pktRcvDropTotal;
-                            leg->retrans_total = member_stats.pktRcvRetrans;
-                            leg->bandwidth_mbps = member_stats.mbpsBandwidth;
-                            leg->recv_rate_mbps = member_stats.mbpsRecvRate;
-                            leg->belated_total = member_stats.pktRcvBelated;
-                            leg->belated_avg_ms = member_stats.pktRcvAvgBelatedTime;
-                            leg->belated_avg_valid =
-                                valid_belated_avg_ms(member_stats.pktRcvAvgBelatedTime);
-                            leg->undecrypt_total = member_stats.pktRcvUndecryptTotal;
-                            leg->reorder_distance = member_stats.pktReorderDistance;
-                            leg->rcv_buf_ms = member_stats.msRcvBuf;
-                        }
-                    }
-                }
-            }
-
-            /* CUDTGroup::bstatsSocket() never fills in msRcvTsbPdDelay, so derive the
-             * group's negotiated latency from whichever legs actually reported one. */
-            for (int li = 0; li < leg_count; ++li) {
-                if (!legs[li].latency_valid) continue;
-                have_in_latency = 1;
-                in_latency_ms = max_int(in_latency_ms, legs[li].latency_ms);
-            }
-        } else {
-            have_in_latency = have_in && in_stats.msRcvTsbPdDelay > 0;
-            in_latency_ms = in_stats.msRcvTsbPdDelay;
-        }
+/* Creates, configures, binds and starts listening on the encoder-facing socket.
+ * Returns SRT_INVALID_SOCK after logging why. */
+static SRTSOCKET open_listener(const char *host, int port, const char *query) {
+    SRTSOCKET srv = srt_create_socket();
+    if (srv == SRT_INVALID_SOCK) {
+        set_last_errorf("srt_create_socket: %s", srt_getlasterror_str());
+        relay_logf("srt_create_socket: %s\n", srt_getlasterror_str());
+        return SRT_INVALID_SOCK;
     }
 
-    if (can_read_out) {
-        have_out = srt_bstats(out_sock, &out_stats, 0) != SRT_ERROR;
+    char opt_error[256];
+    if (apply_srt_opts(srv, query, opt_error, sizeof opt_error) != 0) {
+        set_last_errorf("input socket: %s", opt_error);
+        relay_logf("input socket: %s\n", opt_error);
+        srt_close(srv);
+        return SRT_INVALID_SOCK;
     }
-    pthread_mutex_unlock(&g_session_threads_mu);
-
-    pthread_mutex_lock(&g_sessions_mu);
-    if (can_read_in) {
-        g_sessions[slot].state.input_latency_valid = have_in_latency;
-        if (have_in_latency) g_sessions[slot].state.input_latency_ms = in_latency_ms;
-    }
-    g_sessions[slot].state.input_extra_stats_valid = have_in && !is_group_sock;
-    if (g_sessions[slot].state.input_extra_stats_valid) {
-        g_sessions[slot].state.input_bandwidth_mbps = in_stats.mbpsBandwidth;
-        g_sessions[slot].state.input_recv_rate_mbps = in_stats.mbpsRecvRate;
-        g_sessions[slot].state.input_belated_total = in_stats.pktRcvBelated;
-        g_sessions[slot].state.input_belated_avg_ms = in_stats.pktRcvAvgBelatedTime;
-        g_sessions[slot].state.input_belated_avg_valid =
-            valid_belated_avg_ms(in_stats.pktRcvAvgBelatedTime);
-        g_sessions[slot].state.input_undecrypt_total = in_stats.pktRcvUndecryptTotal;
-        g_sessions[slot].state.input_reorder_distance = in_stats.pktReorderDistance;
-        g_sessions[slot].state.input_rcv_buf_ms = in_stats.msRcvBuf;
-    }
-    if (have_in) {
-        g_sessions[slot].state.input_rtt_ms = in_stats.msRTT;
-        g_sessions[slot].state.input_rtt_valid = in_stats.msRTT > 0.0;
-        g_sessions[slot].state.recv_packets_total_valid =
-            !(is_group_sock && in_stats.pktRecvTotal == 0 && in_stats.pktRecvUniqueTotal > 0);
-        /* SRT group sockets only expose unique receive and group-drop
-         * statistics. Loss/retransmission are meaningful per member socket,
-         * but there is no deduplicated group equivalent. */
-        g_sessions[slot].state.recv_loss_total_valid = have_in && !is_group_sock;
-        g_sessions[slot].state.retrans_total_valid = have_in && !is_group_sock;
-        g_sessions[slot].state.recv_packets_total =
-            max_ll(g_sessions[slot].state.recv_packets_total, in_stats.pktRecvTotal);
-        g_sessions[slot].state.recv_unique_packets_total =
-            max_ll(g_sessions[slot].state.recv_unique_packets_total, in_stats.pktRecvUniqueTotal);
-        g_sessions[slot].state.recv_loss_total =
-            max_int(g_sessions[slot].state.recv_loss_total, in_stats.pktRcvLossTotal);
-        g_sessions[slot].state.recv_drop_total =
-            max_int(g_sessions[slot].state.recv_drop_total, in_stats.pktRcvDropTotal);
-        g_sessions[slot].state.retrans_total =
-            max_int(g_sessions[slot].state.retrans_total, in_stats.pktRcvRetrans);
-    }
-    if (have_out) {
-        /* msRcvTsbPdDelay is the same negotiated latency SRTO_LATENCY reports,
-         * already present in this bstats call. */
-        g_sessions[slot].state.output_latency_valid = out_stats.msRcvTsbPdDelay > 0;
-        g_sessions[slot].state.output_latency_ms = out_stats.msRcvTsbPdDelay;
-        g_sessions[slot].state.output_rtt_ms = out_stats.msRTT;
-        g_sessions[slot].state.output_rtt_valid = out_stats.msRTT > 0.0;
-        g_sessions[slot].state.output_extra_stats_valid = 1;
-        g_sessions[slot].state.output_sent_packets_total = out_stats.pktSentTotal;
-        g_sessions[slot].state.output_send_loss_total = out_stats.pktSndLossTotal;
-        g_sessions[slot].state.output_send_drop_total = out_stats.pktSndDropTotal;
-        g_sessions[slot].state.output_retrans_total = out_stats.pktRetransTotal;
-        g_sessions[slot].state.output_bandwidth_mbps = out_stats.mbpsBandwidth;
-        g_sessions[slot].state.output_send_rate_mbps = out_stats.mbpsSendRate;
-        g_sessions[slot].state.output_undecrypt_total = out_stats.pktRcvUndecryptTotal;
-        g_sessions[slot].state.output_snd_buf_ms = out_stats.msSndBuf;
-    }
-    g_sessions[slot].state.leg_count = leg_count;
-    for (int li = 0; li < leg_count; ++li) {
-        g_sessions[slot].state.legs[li] = legs[li];
-    }
-    g_sessions[slot].state.last_stats_at_ms = now;
-    pthread_mutex_unlock(&g_sessions_mu);
-}
-
-static int stream_input_still_connected(SRTSOCKET conn) {
-    SRT_SOCKSTATUS st = srt_getsockstate(conn);
-    return st == SRTS_CONNECTED || st == SRTS_LISTENING || st == SRTS_CONNECTING;
-}
-
-/* Writes ,"<key>: " (no leading comma for the first field in an object),
- * advancing *first. Callers write the value immediately after. Output is
- * compact (no pretty-printing) since nothing requires this JSON to be
- * human-formatted. */
-static void json_key(FILE *f, int *first, const char *key) {
-    fprintf(f, "%s\"%s\":", *first ? "" : ",", key);
-    *first = 0;
-}
-
-static void json_bool(FILE *f, int *first, const char *key, int val) {
-    json_key(f, first, key);
-    fputs(val ? "true" : "false", f);
-}
-
-static void json_str(FILE *f, int *first, const char *key, const char *val) {
-    json_key(f, first, key);
-    if (!val) {
-        fputs("null", f);
-        return;
-    }
-    fputc('"', f);
-    json_write_escaped(f, val);
-    fputc('"', f);
-}
-
-static void json_ll(FILE *f, int *first, const char *key, long long val) {
-    json_key(f, first, key);
-    fprintf(f, "%lld", val);
-}
-
-static void json_int(FILE *f, int *first, const char *key, int val) {
-    json_key(f, first, key);
-    fprintf(f, "%d", val);
-}
-
-static void json_ll_opt(FILE *f, int *first, const char *key, int valid, long long val) {
-    json_key(f, first, key);
-    if (valid)
-        fprintf(f, "%lld", val);
-    else
-        fputs("null", f);
-}
-
-static void json_int_opt(FILE *f, int *first, const char *key, int valid, int val) {
-    json_key(f, first, key);
-    if (valid)
-        fprintf(f, "%d", val);
-    else
-        fputs("null", f);
-}
-
-static void json_dbl_opt(FILE *f, int *first, const char *key, int valid, double val) {
-    json_key(f, first, key);
-    if (valid)
-        fprintf(f, "%.3f", val);
-    else
-        fputs("null", f);
-}
-
-static void write_status_response(int client_fd) {
-    relay_stream_state_t states[MAX_ACTIVE_SESSIONS];
-    char last_error[sizeof g_last_error];
-    long long updated_at_ms = now_ms();
-
-    pthread_mutex_lock(&g_sessions_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        states[i] = g_sessions[i].state;
-    }
-    memcpy(last_error, g_last_error, sizeof last_error);
-    pthread_mutex_unlock(&g_sessions_mu);
-
-    int out_fd = dup(client_fd);
-    if (out_fd < 0) return;
-    FILE *f = fdopen(out_fd, "w");
-    if (!f) {
-        close(out_fd);
-        return;
-    }
-
-    fputs("HTTP/1.1 200 OK\r\n"
-          "Content-Type: application/json\r\n"
-          "Cache-Control: no-store\r\n"
-          "Connection: close\r\n"
-          "\r\n"
-          "{",
-          f);
-
-    int top_first = 1;
-    json_ll(f, &top_first, "pid", (long long)getpid());
-    json_ll(f, &top_first, "startedAtMs", g_started_at_ms);
-    json_ll(f, &top_first, "updatedAtMs", updated_at_ms);
-    json_str(f, &top_first, "lastError", last_error[0] ? last_error : NULL);
-
-    json_key(f, &top_first, "activeStreamIds");
-    fputc('[', f);
-    int first = 1;
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (!states[i].streamid[0] || !states[i].input_active) continue;
-        fprintf(f, "%s\"", first ? "" : ",");
-        json_write_escaped(f, states[i].streamid);
-        fputc('"', f);
-        first = 0;
-    }
-    fputc(']', f);
-
-    json_key(f, &top_first, "streamStates");
-    fputc('[', f);
-    first = 1;
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        const relay_stream_state_t *s = &states[i];
-        if (!s->streamid[0]) continue;
-        fprintf(f, "%s{", first ? "" : ",");
-        first = 0;
-
-        int sf = 1;
-        json_str(f, &sf, "streamId", s->streamid);
-        json_bool(f, &sf, "inputActive", s->input_active);
-        json_bool(f, &sf, "outputConnected", s->output_connected);
-        json_int(f, &sf, "retryFailures", s->retry_failures);
-        json_ll(f, &sf, "forwardedPackets", s->forwarded_packets);
-        json_ll(f, &sf, "forwardedBytes", s->forwarded_bytes);
-        json_ll(f, &sf, "lastPacketAt", s->last_packet_at_ms);
-        json_ll(f, &sf, "lastInputPacketAt", s->last_input_packet_at_ms);
-
-        json_key(f, &sf, "input");
-        fputc('{', f);
-        int inf = 1;
-        json_bool(f, &inf, "bonded", s->input_bonded);
-        json_key(f, &inf, "peer");
-        if (s->input_bonded || !s->input_peer_ip[0]) {
-            fputs("null", f);
-        } else {
-            fputc('{', f);
-            int pf = 1;
-            json_str(f, &pf, "ip", s->input_peer_ip);
-            json_int(f, &pf, "port", s->input_peer_port);
-            fputc('}', f);
-        }
-        json_ll_opt(f, &inf, "recvPacketsTotal", s->recv_packets_total_valid,
-                    s->recv_packets_total);
-        json_ll(f, &inf, "recvUniquePacketsTotal", s->recv_unique_packets_total);
-        json_int_opt(f, &inf, "recvLossTotal", s->recv_loss_total_valid, s->recv_loss_total);
-        json_int(f, &inf, "recvDropTotal", s->recv_drop_total);
-        json_int_opt(f, &inf, "retransTotal", s->retrans_total_valid, s->retrans_total);
-        json_dbl_opt(f, &inf, "rttMs", s->input_rtt_valid, s->input_rtt_ms);
-        json_int_opt(f, &inf, "latencyMs", s->input_latency_valid, s->input_latency_ms);
-        json_dbl_opt(f, &inf, "bandwidthMbps", s->input_extra_stats_valid, s->input_bandwidth_mbps);
-        json_dbl_opt(f, &inf, "recvRateMbps", s->input_extra_stats_valid, s->input_recv_rate_mbps);
-        json_ll_opt(f, &inf, "belatedTotal", s->input_extra_stats_valid, s->input_belated_total);
-        json_dbl_opt(f, &inf, "belatedAvgMs",
-                     s->input_extra_stats_valid && s->input_belated_avg_valid,
-                     s->input_belated_avg_ms);
-        json_int_opt(f, &inf, "undecryptTotal", s->input_extra_stats_valid,
-                     s->input_undecrypt_total);
-        json_int_opt(f, &inf, "reorderDistance", s->input_extra_stats_valid,
-                     s->input_reorder_distance);
-        json_int_opt(f, &inf, "rcvBufMs", s->input_extra_stats_valid, s->input_rcv_buf_ms);
-
-        json_key(f, &inf, "legs");
-        fputc('[', f);
-        int leg_first = 1;
-        for (int j = 0; j < s->leg_count; ++j) {
-            const relay_leg_state_t *leg = &s->legs[j];
-            fprintf(f, "%s{", leg_first ? "" : ",");
-            leg_first = 0;
-
-            int lf = 1;
-            json_str(f, &lf, "ip", leg->ip);
-            json_int(f, &lf, "port", leg->port);
-            json_str(f, &lf, "state", member_state_str(leg->member_state));
-            json_dbl_opt(f, &lf, "rttMs", leg->rtt_valid, leg->rtt_ms);
-            json_int_opt(f, &lf, "latencyMs", leg->latency_valid, leg->latency_ms);
-            json_ll_opt(f, &lf, "recvPacketsTotal", leg->stats_valid, leg->recv_packets_total);
-            json_ll_opt(f, &lf, "recvUniquePacketsTotal", leg->stats_valid,
-                        leg->recv_unique_packets_total);
-            json_int_opt(f, &lf, "recvLossTotal", leg->stats_valid, leg->recv_loss_total);
-            json_int_opt(f, &lf, "recvDropTotal", leg->stats_valid, leg->recv_drop_total);
-            json_int_opt(f, &lf, "retransTotal", leg->stats_valid, leg->retrans_total);
-            json_dbl_opt(f, &lf, "bandwidthMbps", leg->stats_valid, leg->bandwidth_mbps);
-            json_dbl_opt(f, &lf, "recvRateMbps", leg->stats_valid, leg->recv_rate_mbps);
-            json_ll_opt(f, &lf, "belatedTotal", leg->stats_valid, leg->belated_total);
-            json_dbl_opt(f, &lf, "belatedAvgMs", leg->stats_valid && leg->belated_avg_valid,
-                         leg->belated_avg_ms);
-            json_int_opt(f, &lf, "undecryptTotal", leg->stats_valid, leg->undecrypt_total);
-            json_int_opt(f, &lf, "reorderDistance", leg->stats_valid, leg->reorder_distance);
-            json_int_opt(f, &lf, "rcvBufMs", leg->stats_valid, leg->rcv_buf_ms);
-            fputc('}', f);
-        }
-        fputs("]}", f);
-
-        json_key(f, &sf, "output");
-        fputc('{', f);
-        int outf = 1;
-        json_ll(f, &outf, "sentPacketsTotal", s->output_sent_packets_total);
-        json_int(f, &outf, "sendLossTotal", s->output_send_loss_total);
-        json_int(f, &outf, "sendDropTotal", s->output_send_drop_total);
-        json_int(f, &outf, "retransTotal", s->output_retrans_total);
-        json_dbl_opt(f, &outf, "rttMs", s->output_rtt_valid, s->output_rtt_ms);
-        json_int_opt(f, &outf, "latencyMs", s->output_latency_valid, s->output_latency_ms);
-        json_dbl_opt(f, &outf, "bandwidthMbps", s->output_extra_stats_valid,
-                     s->output_bandwidth_mbps);
-        json_dbl_opt(f, &outf, "sendRateMbps", s->output_extra_stats_valid,
-                     s->output_send_rate_mbps);
-        json_int_opt(f, &outf, "undecryptTotal", s->output_extra_stats_valid,
-                     s->output_undecrypt_total);
-        json_int_opt(f, &outf, "sndBufMs", s->output_extra_stats_valid, s->output_snd_buf_ms);
-        fputc('}', f);
-
-        json_ll(f, &sf, "lastErrorAt", s->last_error_at_ms);
-        json_str(f, &sf, "lastError", s->last_error[0] ? s->last_error : NULL);
-        fputc('}', f);
-    }
-    fputc(']', f);
-
-    fputs("}\n", f);
-    fclose(f);
-}
-
-static void *status_http_main(void *arg) {
-    (void)arg;
-
-    int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) {
-        set_last_errorf("status socket(): %s", strerror(errno));
-        perror("status socket");
-        return NULL;
-    }
-
-    int one = 1;
-    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
 
     struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sa.sin_port = htons((unsigned short)g_status_port);
-
-    if (bind(srv, (struct sockaddr *)&sa, sizeof sa) < 0) {
-        set_last_errorf("status bind :%d failed: %s", g_status_port, strerror(errno));
-        relay_logf("status bind :%d failed: %s\n", g_status_port, strerror(errno));
-        close(srv);
-        return NULL;
-    }
-    if (listen(srv, 16) < 0) {
-        set_last_errorf("status listen failed: %s", strerror(errno));
-        relay_logf("status listen failed: %s\n", strerror(errno));
-        close(srv);
-        return NULL;
-    }
-
-    relay_logf("Status HTTP listening on 127.0.0.1:%d\n", g_status_port);
-
-    while (g_running) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(srv, &rfds);
-        struct timeval tv;
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-        int ready = select(srv + 1, &rfds, NULL, NULL, &tv);
-        if (ready <= 0) continue;
-
-        int client = accept(srv, NULL, NULL);
-        if (client < 0) continue;
-
-        char req[1024];
-        ssize_t req_len = recv(client, req, sizeof req, 0);
-        if (req_len <= 0) {
-            close(client);
-            continue;
-        }
-        write_status_response(client);
-        close(client);
-    }
-
-    close(srv);
-    return NULL;
-}
-
-static void apply_srt_opts(SRTSOCKET sock, const char *query) {
-    char val[512];
-
-    if (get_param(query, "transtype", val, sizeof val)) {
-        SRT_TRANSTYPE tt = strcmp(val, "live") == 0 ? SRTT_LIVE : SRTT_FILE;
-        srt_setsockflag(sock, SRTO_TRANSTYPE, &tt, sizeof tt);
-    }
-    if (get_param(query, "groupconnect", val, sizeof val)) {
-        int v = atoi(val);
-        srt_setsockflag(sock, SRTO_GROUPCONNECT, &v, sizeof v);
-    }
-    if (get_param(query, "latency", val, sizeof val)) {
-        int v = atoi(val);
-        srt_setsockflag(sock, SRTO_LATENCY, &v, sizeof v);
-    }
-    if (get_param(query, "rcvlatency", val, sizeof val)) {
-        int v = atoi(val);
-        srt_setsockflag(sock, SRTO_RCVLATENCY, &v, sizeof v);
-    }
-    if (get_param(query, "passphrase", val, sizeof val)) {
-        srt_setsockflag(sock, SRTO_PASSPHRASE, val, (int)strlen(val));
-    }
-    if (get_param(query, "pbkeylen", val, sizeof val)) {
-        int v = atoi(val);
-        srt_setsockflag(sock, SRTO_PBKEYLEN, &v, sizeof v);
-    }
-}
-
-static int get_streamid(SRTSOCKET sock, char *sid, size_t sid_sz) {
-    if (sid_sz == 0) return 0;
-    sid[0] = '\0';
-    int sid_len = (int)sid_sz - 1;
-    if (srt_getsockflag(sock, SRTO_STREAMID, sid, &sid_len) == SRT_ERROR) return 0;
-    if (sid_len < 0) sid_len = 0;
-    if ((size_t)sid_len >= sid_sz) sid_len = (int)sid_sz - 1;
-    sid[sid_len] = '\0';
-    return sid_len > 0;
-}
-
-static SRTSOCKET connect_srt_output(const relay_config_t *cfg, const char *streamid,
-                                    int tracker_slot, char *error_out, size_t error_out_sz) {
-    if (error_out && error_out_sz > 0) error_out[0] = '\0';
-
-    SRTSOCKET srt_out = srt_create_socket();
-    if (srt_out == SRT_INVALID_SOCK) {
-        if (error_out && error_out_sz > 0) {
-            snprintf(error_out, error_out_sz, "srt_create_socket(out): %s", srt_getlasterror_str());
-        }
-        set_last_errorf("srt_create_socket(out): %s", srt_getlasterror_str());
-        relay_logf("srt_create_socket(out): %s\n", srt_getlasterror_str());
-        return SRT_INVALID_SOCK;
-    }
-    set_tracked_session_output_socket(tracker_slot, srt_out);
-
-    SRT_TRANSTYPE tt = SRTT_LIVE;
-    srt_setsockflag(srt_out, SRTO_TRANSTYPE, &tt, sizeof tt);
-    apply_srt_opts(srt_out, cfg->out_query);
-
-    if (streamid && streamid[0]) {
-        srt_setsockflag(srt_out, SRTO_STREAMID, streamid, (int)strlen(streamid));
-    }
-
-    int cto = 3000;
-    srt_setsockflag(srt_out, SRTO_CONNTIMEO, &cto, sizeof cto);
-
-    if (srt_connect(srt_out, (struct sockaddr *)&cfg->out_addr, (int)cfg->out_addrlen) ==
-        SRT_ERROR) {
-        char out_ip[INET6_ADDRSTRLEN] = "?";
-        int out_port = 0;
-        format_leg_addr(&cfg->out_addr, out_ip, sizeof out_ip, &out_port);
-        int error_code = srt_getlasterror(NULL);
-        char error_text[256];
-        snprintf(error_text, sizeof error_text, "%s", srt_getlasterror_str());
-        int reject_reason =
-            error_code == SRT_ECONNREJ ? srt_getrejectreason(srt_out) : SRT_REJ_UNKNOWN;
-        const char *reason_text =
-            reject_reason != SRT_REJ_UNKNOWN ? srt_rejectreason_str(reject_reason) : NULL;
-
-        if (reject_reason != SRT_REJ_UNKNOWN) {
-            if (error_out && error_out_sz > 0) {
-                snprintf(error_out, error_out_sz,
-                         "srt_connect target=%s:%d streamid=%s: %s (reject=%s/%d)", out_ip,
-                         out_port, streamid && streamid[0] ? streamid : "(empty)", error_text,
-                         reason_text ? reason_text : "unknown", reject_reason);
-            }
-            set_last_errorf("srt_connect target=%s:%d streamid=%s: %s (reject=%s/%d)", out_ip,
-                            out_port, streamid && streamid[0] ? streamid : "(empty)", error_text,
-                            reason_text ? reason_text : "unknown", reject_reason);
-            relay_logf("srt_connect failed target=%s:%d streamid=%s error=\"%s\" reject=%s/%d\n",
-                       out_ip, out_port, streamid && streamid[0] ? streamid : "(empty)", error_text,
-                       reason_text ? reason_text : "unknown", reject_reason);
-        } else {
-            if (error_out && error_out_sz > 0) {
-                snprintf(error_out, error_out_sz, "srt_connect target=%s:%d streamid=%s: %s",
-                         out_ip, out_port, streamid && streamid[0] ? streamid : "(empty)",
-                         error_text);
-            }
-            set_last_errorf("srt_connect target=%s:%d streamid=%s: %s", out_ip, out_port,
-                            streamid && streamid[0] ? streamid : "(empty)", error_text);
-            relay_logf("srt_connect failed target=%s:%d streamid=%s error=\"%s\"\n", out_ip,
-                       out_port, streamid && streamid[0] ? streamid : "(empty)", error_text);
-        }
-        if (take_tracked_output_socket(tracker_slot, srt_out) != SRT_INVALID_SOCK) {
-            srt_close(srt_out);
-        }
-        return SRT_INVALID_SOCK;
-    }
-    if (!tracked_socket_is_current(tracker_slot, SRT_INVALID_SOCK, srt_out)) {
+    if (resolve_input_bind_addr(host, port, &sa) < 0) {
+        srt_close(srv);
         return SRT_INVALID_SOCK;
     }
 
-    return srt_out;
+    if (srt_bind(srv, (struct sockaddr *)&sa, sizeof sa) == SRT_ERROR) {
+        set_last_errorf("srt_bind %s:%d: %s", host, port, srt_getlasterror_str());
+        relay_logf("srt_bind %s:%d: %s\n", host, port, srt_getlasterror_str());
+        srt_close(srv);
+        return SRT_INVALID_SOCK;
+    }
+    if (srt_listen(srv, LISTEN_BACKLOG) == SRT_ERROR) {
+        set_last_errorf("srt_listen: %s", srt_getlasterror_str());
+        relay_logf("srt_listen: %s\n", srt_getlasterror_str());
+        srt_close(srv);
+        return SRT_INVALID_SOCK;
+    }
+    return srv;
 }
 
-static SRTSOCKET connect_srt_output_with_retry(const relay_config_t *cfg, const char *streamid,
-                                               int state_slot, int tracker_slot,
-                                               long long *next_retry_at_ms) {
-    char output_error[512];
-    SRTSOCKET srt_out =
-        connect_srt_output(cfg, streamid, tracker_slot, output_error, sizeof output_error);
-    if (srt_out != SRT_INVALID_SOCK) {
-        set_stream_output_connected(state_slot, 1);
-        if (next_retry_at_ms) *next_retry_at_ms = 0;
-        return srt_out;
-    }
+/* Accepts connections until the process is asked to stop; each one becomes a
+ * session thread. */
+static void accept_loop(SRTSOCKET srv, int ep, const output_target_t *target) {
+    while (relay_running()) {
+        SRT_EPOLL_EVENT ev[MAX_EVENTS];
+        int n = srt_epoll_uwait(ep, ev, MAX_EVENTS, 1000);
+        if (n <= 0) continue;
 
-    increment_stream_retry_failures(state_slot);
-    int failures = get_stream_retry_failures(state_slot);
-    int delay_ms = get_retry_delay_ms(failures);
-    set_stream_output_connected(state_slot, 0);
-    if (output_error[0]) {
-        set_stream_errorf(state_slot,
-                          "Failed to publish to downstream output: %s; retrying in %d ms",
-                          output_error, delay_ms);
-    } else {
-        set_stream_errorf(state_slot, "Failed to publish to downstream output; retrying in %d ms",
-                          delay_ms);
-    }
-    relay_logf("Output publish retry streamid=%s failures=%d retry_ms=%d\n",
-               streamid && streamid[0] ? streamid : "(empty)", failures, delay_ms);
-    if (next_retry_at_ms) *next_retry_at_ms = now_ms() + delay_ms;
-    return SRT_INVALID_SOCK;
-}
+        for (int i = 0; i < n && relay_running(); ++i) {
+            if (ev[i].fd != srv) continue;
 
-static void *session_main(void *arg) {
-    session_args_t *args = (session_args_t *)arg;
-    SRTSOCKET conn = args->conn;
-    const relay_config_t *cfg = args->cfg;
-    int tracker_slot = args->tracker_slot;
-    char peer_ip[INET6_ADDRSTRLEN];
-    snprintf(peer_ip, sizeof peer_ip, "%s", args->peer_ip[0] ? args->peer_ip : "?");
-    int peer_port = args->peer_port;
-    free(args);
-    long long started_at_ms = now_ms();
-    long long bytes_forwarded = 0;
-    long long packets_forwarded = 0;
-    const char *close_reason = "input_disconnected";
-
-    char streamid[1024];
-    if (!get_streamid(conn, streamid, sizeof streamid)) {
-        if (!get_param(cfg->out_query, "streamid", streamid, sizeof streamid)) {
-            streamid[0] = '\0';
-        }
-    }
-    set_tracked_session_streamid(tracker_slot, streamid);
-
-    int input_bonded = (conn & SRTGROUP_MASK) != 0;
-    relay_logf("Accepted %s SRT source peer=%s:%d streamid=%s\n", input_bonded ? "bonded" : "plain",
-               peer_ip, peer_port, streamid[0] ? streamid : "(empty)");
-    int state_slot = claim_stream_state(streamid, tracker_slot);
-    SRTSOCKET srt_out = SRT_INVALID_SOCK;
-    long long next_output_retry_at_ms = 0;
-
-    if (state_slot == -2) {
-        long long deadline = now_ms() + DUPLICATE_TAKEOVER_WAIT_MS;
-        int takeover_started = 0;
-        do {
-            long long now = now_ms();
-            long long input_age_ms = 0;
-            int stream_present = stream_input_age_ms(streamid, now, &input_age_ms) == 0;
-
-            if (!stream_present) {
-                state_slot = claim_stream_state(streamid, tracker_slot);
-                if (state_slot != -2) break;
-            } else if (input_age_ms >= DUPLICATE_TAKEOVER_STALE_MS) {
-                if (!takeover_started) {
-                    set_last_errorf("Duplicate publisher takeover for stale streamid=%s", streamid);
-                    relay_logf("Duplicate publisher takeover for stale streamid=%s\n", streamid);
-                    close_tracked_sessions_for_streamid(streamid, tracker_slot);
-                    takeover_started = 1;
-                }
-                state_slot = claim_stream_state(streamid, tracker_slot);
-                if (state_slot != -2) break;
-            }
-
-            struct timespec ts;
-            ts.tv_sec = 0;
-            ts.tv_nsec = 50 * 1000 * 1000;
-            nanosleep(&ts, NULL);
-        } while (g_running && state_slot == -2 && now_ms() < deadline);
-
-        if (state_slot == -2) {
-            set_last_errorf("Duplicate publisher rejected for active streamid=%s", streamid);
-            relay_logf("Duplicate publisher rejected for active streamid=%s\n", streamid);
-            goto cleanup;
-        }
-    }
-    if (state_slot < 0 && streamid[0]) {
-        set_last_errorf("No stream state slot available for streamid=%s", streamid);
-        relay_logf("No stream state slot available for streamid=%s\n", streamid);
-        goto cleanup;
-    }
-
-    set_stream_input_info(state_slot, input_bonded, peer_ip, peer_port);
-    srt_out = connect_srt_output_with_retry(cfg, streamid, state_slot, tracker_slot,
-                                            &next_output_retry_at_ms);
-
-    char buf[CHUNK];
-    while (g_running && stream_input_still_connected(conn)) {
-        if (srt_out == SRT_INVALID_SOCK && now_ms() >= next_output_retry_at_ms) {
-            srt_out = connect_srt_output_with_retry(cfg, streamid, state_slot, tracker_slot,
-                                                    &next_output_retry_at_ms);
-        }
-
-        SRT_MSGCTRL mc = srt_msgctrl_default;
-        int r = srt_recvmsg2(conn, buf, CHUNK, &mc);
-        if (r == SRT_ERROR) {
-            int err = srt_getlasterror(NULL);
-            if (err != SRT_ECONNLOST && err != SRT_ENOCONN) {
-                close_reason = "input_error";
-                set_last_errorf("srt_recvmsg2: %s", srt_getlasterror_str());
-                set_stream_errorf(state_slot, "Input error from peer %s:%d: %s", peer_ip, peer_port,
-                                  srt_getlasterror_str());
-                relay_logf("srt_recvmsg2 failed peer=%s:%d streamid=%s error=\"%s\"\n", peer_ip,
-                           peer_port, streamid[0] ? streamid : "(empty)", srt_getlasterror_str());
-            }
-            break;
-        }
-        if (r <= 0) continue;
-        record_stream_input_progress(state_slot);
-        update_stream_srt_counters(state_slot, tracker_slot, conn, srt_out, 0);
-
-        if (srt_out != SRT_INVALID_SOCK) {
-            if (srt_sendmsg2(srt_out, buf, r, NULL) == SRT_ERROR) {
-                char out_ip[INET6_ADDRSTRLEN] = "?";
-                int out_port = 0;
-                format_leg_addr(&cfg->out_addr, out_ip, sizeof out_ip, &out_port);
-                set_last_errorf("srt_sendmsg2: %s", srt_getlasterror_str());
-                set_stream_errorf(state_slot, "Relay output error to %s:%d (input peer %s:%d): %s",
-                                  out_ip, out_port, peer_ip, peer_port, srt_getlasterror_str());
-                set_stream_output_connected(state_slot, 0);
-                relay_logf("srt_sendmsg2 failed peer=%s:%d streamid=%s error=\"%s\"\n", peer_ip,
-                           peer_port, streamid[0] ? streamid : "(empty)", srt_getlasterror_str());
-                if (take_tracked_output_socket(tracker_slot, srt_out) != SRT_INVALID_SOCK) {
-                    srt_close(srt_out);
-                }
-                srt_out = SRT_INVALID_SOCK;
-                // A send failure here almost always means the transport-level
-                // connect succeeded (SRS accepts the SRT handshake) but the
-                // stream was then rejected/torn down by SRS's on_publish hook.
-                // Without backoff, a persistently unauthorized stream key
-                // reconnects and fails again in a tight loop bounded only by
-                // handshake + hook round-trip time (seen in production at
-                // 10-40ms intervals, sustained indefinitely). Route through the
-                // same backoff table connect_srt_output_with_retry() uses for
-                // outright connect failures.
-                increment_stream_retry_failures(state_slot);
-                int send_retry_failures = get_stream_retry_failures(state_slot);
-                int send_retry_delay_ms = get_retry_delay_ms(send_retry_failures);
-                next_output_retry_at_ms = now_ms() + send_retry_delay_ms;
-                relay_logf("Output send retry streamid=%s failures=%d retry_ms=%d\n",
-                           streamid[0] ? streamid : "(empty)", send_retry_failures,
-                           send_retry_delay_ms);
+            struct sockaddr_storage peer;
+            int plen = (int)sizeof peer;
+            SRTSOCKET conn = srt_accept(srv, (struct sockaddr *)&peer, &plen);
+            if (conn == SRT_INVALID_SOCK) {
+                set_last_errorf("srt_accept: %s", srt_getlasterror_str());
+                relay_logf("srt_accept: %s\n", srt_getlasterror_str());
                 continue;
             }
-            record_stream_forward_progress(state_slot, r);
-            bytes_forwarded += r;
-            packets_forwarded++;
+            session_spawn(conn, target, &peer);
         }
     }
-
-    if (!g_running) close_reason = "shutdown";
-    update_stream_srt_counters(state_slot, tracker_slot, conn, srt_out, 1);
-    if (srt_out != SRT_INVALID_SOCK &&
-        take_tracked_output_socket(tracker_slot, srt_out) != SRT_INVALID_SOCK) {
-        srt_close(srt_out);
-    }
-    remove_stream_state(state_slot);
-    relay_logf("Connection closed peer=%s:%d streamid=%s reason=%s duration_ms=%lld "
-               "bytes_forwarded=%lld packets_forwarded=%lld\n",
-               peer_ip, peer_port, streamid[0] ? streamid : "(empty)", close_reason,
-               now_ms() - started_at_ms, bytes_forwarded, packets_forwarded);
-
-cleanup:
-    if (take_tracked_input_socket(tracker_slot, conn) != SRT_INVALID_SOCK) {
-        srt_close(conn);
-    }
-    unregister_session_thread(tracker_slot);
-    return NULL;
-}
-
-static int resolve_ipv4_addr(const char *host, int port, int ai_flags, const char *context,
-                             struct sockaddr_storage *addr, socklen_t *addrlen) {
-    struct addrinfo hints;
-    struct addrinfo *res = NULL;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_flags = ai_flags;
-
-    char portstr[16];
-    snprintf(portstr, sizeof portstr, "%d", port);
-    int rc = getaddrinfo(host, portstr, &hints, &res);
-    if (rc != 0 || !res) {
-        relay_logf("getaddrinfo failed for %s %s:%d: %s\n", context, host, port,
-                   rc == 0 ? "no address" : gai_strerror(rc));
-        return -1;
-    }
-
-    *addrlen = (socklen_t)res->ai_addrlen;
-    memcpy(addr, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-    return 0;
-}
-
-static int resolve_output(const char *host, int port, relay_config_t *cfg) {
-    return resolve_ipv4_addr(host, port, 0, "output", &cfg->out_addr, &cfg->out_addrlen);
-}
-
-static int resolve_input_bind_addr(const char *host, int port, struct sockaddr_in *sa) {
-    memset(sa, 0, sizeof *sa);
-    sa->sin_family = AF_INET;
-    sa->sin_port = htons((unsigned short)port);
-
-    if (!host || !host[0] || strcmp(host, "0.0.0.0") == 0 || strcmp(host, "*") == 0) {
-        sa->sin_addr.s_addr = htonl(INADDR_ANY);
-        return 0;
-    }
-
-    struct sockaddr_storage resolved;
-    socklen_t resolved_len = 0;
-    if (resolve_ipv4_addr(host, port, AI_PASSIVE, "input", &resolved, &resolved_len) < 0) {
-        return -1;
-    }
-
-    (void)resolved_len;
-    memcpy(sa, &resolved, sizeof *sa);
-    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -1498,43 +186,27 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    char input_uri[2048];
-    char output_uri[2048];
-    if (argc == 2) {
-        file_config_t file_cfg;
-        if (load_config_file(argv[1], &file_cfg) < 0) {
-            relay_logf("Bad config file: %s\n", argv[1]);
-            return 1;
-        }
-        if (build_srt_uri(input_uri, sizeof input_uri, file_cfg.input_host, file_cfg.input_port,
-                          file_cfg.passphrase, 1) != 0 ||
-            build_srt_uri(output_uri, sizeof output_uri, file_cfg.output_host, file_cfg.output_port,
-                          file_cfg.passphrase, 0) != 0) {
-            relay_logf("Bad config file: failed to build SRT URI\n");
-            return 1;
-        }
-        if (file_cfg.status_port > 0 && file_cfg.status_port <= 65535) {
-            g_status_port = file_cfg.status_port;
-        }
-    } else {
-        strncpy(input_uri, argv[1], sizeof input_uri - 1);
-        input_uri[sizeof input_uri - 1] = '\0';
-        strncpy(output_uri, argv[2], sizeof output_uri - 1);
-        output_uri[sizeof output_uri - 1] = '\0';
-    }
+    relay_args_t args;
+    if (read_args(argc, argv, &args) < 0) return 1;
 
-    char in_scheme[8], in_host[64], in_query[1024];
+    /* A URI can carry a passphrase, so only a redacted copy is ever logged. */
+    char logged_input_uri[sizeof args.input_uri];
+    char logged_output_uri[sizeof args.output_uri];
+    redact_srt_uri(args.input_uri, logged_input_uri, sizeof logged_input_uri);
+    redact_srt_uri(args.output_uri, logged_output_uri, sizeof logged_output_uri);
+
+    char in_scheme[8], in_host[256], in_query[1024];
     char out_scheme[8], out_host[256], out_query[1024];
     int in_port, out_port;
 
-    if (parse_uri(input_uri, in_scheme, sizeof in_scheme, in_host, sizeof in_host, &in_port,
+    if (parse_uri(args.input_uri, in_scheme, sizeof in_scheme, in_host, sizeof in_host, &in_port,
                   in_query, sizeof in_query) < 0) {
-        relay_logf("Bad input URI: %s\n", input_uri);
+        relay_logf("Bad input URI: %s\n", logged_input_uri);
         return 1;
     }
-    if (parse_uri(output_uri, out_scheme, sizeof out_scheme, out_host, sizeof out_host, &out_port,
-                  out_query, sizeof out_query) < 0) {
-        relay_logf("Bad output URI: %s\n", output_uri);
+    if (parse_uri(args.output_uri, out_scheme, sizeof out_scheme, out_host, sizeof out_host,
+                  &out_port, out_query, sizeof out_query) < 0) {
+        relay_logf("Bad output URI: %s\n", logged_output_uri);
         return 1;
     }
     if (strcmp(in_scheme, "srt") != 0) {
@@ -1545,69 +217,44 @@ int main(int argc, char *argv[]) {
         relay_logf("Output URI must use srt://\n");
         return 1;
     }
-
-    relay_config_t cfg;
-    memset(&cfg, 0, sizeof cfg);
-    snprintf(cfg.out_query, sizeof cfg.out_query, "%s", out_query);
-
-    if (resolve_output(out_host, out_port, &cfg) < 0) return 1;
-    const char *status_port = getenv("SRT_BONDING_STATUS_PORT");
-    if (status_port && status_port[0]) {
-        int port = atoi(status_port);
-        if (port > 0 && port <= 65535) g_status_port = port;
+    if (check_uri_passphrase(in_query, "input") < 0 ||
+        check_uri_passphrase(out_query, "output") < 0) {
+        return 1;
     }
-    g_started_at_ms = now_ms();
 
-    if (install_signal_handlers() != 0) {
+    output_target_t target;
+    memset(&target, 0, sizeof target);
+    snprintf(target.out_query, sizeof target.out_query, "%s", out_query);
+    if (resolve_output_addr(out_host, out_port, &target.out_addr, &target.out_addrlen) < 0) {
+        return 1;
+    }
+
+    long long started_at_ms = now_ms();
+
+    if (relay_install_signal_handlers() != 0) {
         relay_logf("install signal handlers failed: %s\n", strerror(errno));
         return 1;
     }
-    init_session_tracking();
+    tracker_init();
 
     srt_startup();
-    /* See srt_log_handler's comment above: cap libsrt's own log volume so a
-     * receive-queue backlog or other internal condition can't flood the
-     * process's log output badly enough to starve the host it runs on. */
-    srt_setloglevel(LOG_ERR);
-    srt_setloghandler(NULL, srt_log_handler);
+    /* Cap libsrt's own log volume so a receive-queue backlog or other internal
+     * condition can't flood the process's log output badly enough to starve the
+     * host it runs on. */
+    log_install_srt_cap();
 
-    SRTSOCKET srv = srt_create_socket();
+    SRTSOCKET srv = open_listener(in_host, in_port, in_query);
     if (srv == SRT_INVALID_SOCK) {
-        set_last_errorf("srt_create_socket: %s", srt_getlasterror_str());
-        relay_logf("srt_create_socket: %s\n", srt_getlasterror_str());
-        srt_cleanup();
-        return 1;
-    }
-
-    apply_srt_opts(srv, in_query);
-
-    struct sockaddr_in sa;
-    if (resolve_input_bind_addr(in_host, in_port, &sa) < 0) {
-        srt_close(srv);
-        srt_cleanup();
-        return 1;
-    }
-
-    if (srt_bind(srv, (struct sockaddr *)&sa, sizeof sa) == SRT_ERROR) {
-        set_last_errorf("srt_bind %s:%d: %s", in_host, in_port, srt_getlasterror_str());
-        relay_logf("srt_bind %s:%d: %s\n", in_host, in_port, srt_getlasterror_str());
-        srt_close(srv);
-        srt_cleanup();
-        return 1;
-    }
-    if (srt_listen(srv, LISTEN_BACKLOG) == SRT_ERROR) {
-        set_last_errorf("srt_listen: %s", srt_getlasterror_str());
-        relay_logf("srt_listen: %s\n", srt_getlasterror_str());
-        srt_close(srv);
         srt_cleanup();
         return 1;
     }
 
     relay_logf("Listening on SRT (bonded and plain) %s:%d (backlog=%d) -> %s\n", in_host, in_port,
-               LISTEN_BACKLOG, output_uri);
+               LISTEN_BACKLOG, logged_output_uri);
 
     pthread_t status_tid;
-    int status_thread_started = pthread_create(&status_tid, NULL, status_http_main, NULL) == 0;
+    int status_thread_started =
+        status_server_start(args.status_port, started_at_ms, &status_tid) == 0;
     if (!status_thread_started) {
         set_last_errorf("pthread_create(status) failed");
         relay_logf("pthread_create(status) failed\n");
@@ -1618,7 +265,7 @@ int main(int argc, char *argv[]) {
         set_last_errorf("srt_epoll_create: %s", srt_getlasterror_str());
         relay_logf("srt_epoll_create: %s\n", srt_getlasterror_str());
         srt_close(srv);
-        g_running = 0;
+        relay_request_stop();
         if (status_thread_started) pthread_join(status_tid, NULL);
         srt_cleanup();
         return 1;
@@ -1629,66 +276,19 @@ int main(int argc, char *argv[]) {
         relay_logf("srt_epoll_add_usock: %s\n", srt_getlasterror_str());
         srt_epoll_release(ep);
         srt_close(srv);
-        g_running = 0;
+        relay_request_stop();
         if (status_thread_started) pthread_join(status_tid, NULL);
         srt_cleanup();
         return 1;
     }
 
-    while (g_running) {
-        SRT_EPOLL_EVENT ev[MAX_EVENTS];
-        int n = srt_epoll_uwait(ep, ev, MAX_EVENTS, 1000);
-        if (n <= 0) continue;
+    accept_loop(srv, ep, &target);
 
-        for (int i = 0; i < n && g_running; ++i) {
-            if (ev[i].fd != srv) continue;
-
-            struct sockaddr_storage peer;
-            int plen = (int)sizeof peer;
-            SRTSOCKET conn = srt_accept(srv, (struct sockaddr *)&peer, &plen);
-            if (conn == SRT_INVALID_SOCK) {
-                set_last_errorf("srt_accept: %s", srt_getlasterror_str());
-                relay_logf("srt_accept: %s\n", srt_getlasterror_str());
-                continue;
-            }
-
-            session_args_t *args = (session_args_t *)calloc(1, sizeof *args);
-            if (!args) {
-                set_last_errorf("calloc(session): %s", strerror(errno));
-                relay_logf("calloc(session): %s\n", strerror(errno));
-                srt_close(conn);
-                continue;
-            }
-            args->conn = conn;
-            args->cfg = &cfg;
-            format_leg_addr(&peer, args->peer_ip, sizeof args->peer_ip, &args->peer_port);
-            args->tracker_slot = register_session_thread(conn);
-            if (args->tracker_slot < 0) {
-                set_last_errorf("Too many active sessions; rejecting connection");
-                relay_logf("Too many active sessions; rejecting connection\n");
-                srt_close(conn);
-                free(args);
-                continue;
-            }
-
-            pthread_t tid;
-            if (pthread_create(&tid, NULL, session_main, args) != 0) {
-                set_last_errorf("pthread_create(session) failed");
-                relay_logf("pthread_create failed\n");
-                unregister_session_thread(args->tracker_slot);
-                srt_close(conn);
-                free(args);
-                continue;
-            }
-            pthread_detach(tid);
-        }
-    }
-
-    g_running = 0;
+    relay_request_stop();
     srt_epoll_release(ep);
     srt_close(srv);
-    close_active_session_sockets();
-    wait_for_session_threads();
+    tracker_close_all();
+    tracker_wait_all();
     if (status_thread_started) pthread_join(status_tid, NULL);
     srt_cleanup();
     return 0;

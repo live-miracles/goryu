@@ -5,6 +5,7 @@ ARG SRT_TAG=v1.5.6
 ARG SRT_COMMIT=c63c311e88aa55e430e3b7d94b89d790994f88c4
 ARG RELAY_VERSION=dev
 
+# g++ is for building libsrt (cmake); goryu itself is C and is built with gcc below.
 RUN apt-get update -q \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
         build-essential \
@@ -31,7 +32,7 @@ WORKDIR /src/app
 ARG RELAY_SOURCE_SHA=dev
 RUN printf '%s\n' "$RELAY_SOURCE_SHA" > /tmp/relay-source.sha
 COPY src/ ./src/
-RUN g++ -O2 -Wall -Wextra -DRELAY_VERSION=\"${RELAY_VERSION}\" -o goryu src/*.c \
+RUN gcc -O2 -Wall -Wextra -DRELAY_VERSION=\"${RELAY_VERSION}\" -o goryu src/*.c \
     $(pkg-config --cflags --libs srt) -lpthread -lssl -lcrypto -lm
 
 RUN set -eux; \

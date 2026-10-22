@@ -34,6 +34,17 @@ A second connection with a streamid that is already active waits up to 5 s:
 This lets an encoder that crashed and reconnected recover quickly, without
 letting a second encoder hijack a stream that is still flowing.
 
+Each session wakes from its receive once a second (`SRTO_RCVTIMEO`, 1000 ms) even
+when the encoder sends nothing, then re-checks whether it was closed. Up to v3.2.1
+it blocked until data arrived, and that made takeover impossible for a **bonded**
+encoder: libsrt defers `srt_close()` on a group while another thread is receiving
+on it, so the takeover was logged and the stale group was "closed", yet its session
+kept running and the new publisher was rejected 5 s later, for as long as the stale
+legs stayed connected (reproduced on v3.2.1 with a bonded caller that stays
+connected and sends nothing). A plain socket was not affected. The wake-up also
+refreshes the stream's counters, so a silent stream still shows legs joining and
+leaving in the status API.
+
 ## Log volume
 
 libsrt's own log level is set to errors only at startup, so its per-packet
