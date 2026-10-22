@@ -17,9 +17,18 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y clang-format
       - run: bash scripts/format.sh check
 
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/test-unit.sh
+
   smoke:
-    name: Build and smoke test
+    name: Build, smoke and end-to-end tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - run: bash scripts/smoke-test.sh
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg jq
+      - run: bash scripts/test-e2e.sh

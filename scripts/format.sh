@@ -14,7 +14,7 @@ if ! command -v clang-format >/dev/null 2>&1; then
     exit 1
 fi
 
-mapfile -t files < <(find "$REPO_DIR/src" -type f \( -name '*.c' -o -name '*.h' \) | sort)
+mapfile -t files < <(find "$REPO_DIR/src" "$REPO_DIR/tests" -type f \( -name '*.c' -o -name '*.h' \) | sort)
 
 if [[ "$MODE" == "check" ]]; then
     clang-format --dry-run --Werror "${files[@]}"

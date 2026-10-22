@@ -22,9 +22,12 @@ if [[ -d "$LIB_DIR" ]]; then
 fi
 
 relay_pid=""
-usage_out="$(mktemp)"
+WORK_DIR="$(mktemp -d)"
+usage_out="$WORK_DIR/usage.txt"
+relay_log="$WORK_DIR/goryu.log"
+status_json="$WORK_DIR/status.json"
 cleanup() {
-    rm -f "$usage_out"
+    rm -rf "$WORK_DIR"
     if [[ -n "$relay_pid" ]]; then
         kill "$relay_pid" >/dev/null 2>&1 || true
         wait "$relay_pid" >/dev/null 2>&1 || true
@@ -39,31 +42,39 @@ fi
 grep -q "Usage:" "$usage_out"
 
 pushd "$REPO_DIR" >/dev/null
-"${relay_env[@]}" "$BIN_PATH" "$CONFIG_PATH" > /tmp/goryu-smoke.log 2>&1 &
+"${relay_env[@]}" "$BIN_PATH" "$CONFIG_PATH" >"$relay_log" 2>&1 &
 relay_pid="$!"
 popd >/dev/null
 
 for _ in $(seq 1 20); do
     if ! kill -0 "$relay_pid" >/dev/null 2>&1; then
         echo "ERROR: relay process exited before status became healthy" >&2
-        cat /tmp/goryu-smoke.log >&2
+        cat "$relay_log" >&2
         exit 1
     fi
-    if curl -fsS "http://127.0.0.1:${STATUS_PORT}/status" >/tmp/goryu-status.json; then
+    if curl -fsS "http://127.0.0.1:${STATUS_PORT}/status" >"$status_json"; then
         break
     fi
     sleep 0.25
 done
 
-grep -q '"streamStates"' /tmp/goryu-status.json
-STATUS_PID="$(python3 - <<'PY'
+if [[ ! -s "$status_json" ]]; then
+    echo "ERROR: status endpoint on 127.0.0.1:${STATUS_PORT} did not answer within 5 s" >&2
+    echo "(is another process using the ports in goryu.json?)" >&2
+    cat "$relay_log" >&2
+    exit 1
+fi
+
+grep -q '"streamStates"' "$status_json"
+STATUS_PID="$(STATUS_JSON="$status_json" python3 - <<'PY'
 import json
+import os
 from pathlib import Path
-print(json.loads(Path("/tmp/goryu-status.json").read_text())["pid"])
+print(json.loads(Path(os.environ["STATUS_JSON"]).read_text())["pid"])
 PY
 )"
 if [[ "$STATUS_PID" != "$relay_pid" ]]; then
     echo "ERROR: status response came from pid $STATUS_PID, expected $relay_pid" >&2
-    cat /tmp/goryu-smoke.log >&2
+    cat "$relay_log" >&2
     exit 1
 fi
