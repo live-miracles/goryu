@@ -56,7 +56,10 @@ The [status API](../4-reference/1-status-api.md) reports which one a stream is
 [Bunryu](https://github.com/live-miracles/bunryu) runs Goryu as a shared relay
 in front of SRS: encoders publish bonded SRT to Goryu's port (`10081`), and
 Goryu forwards each stream to SRS's SRT port (`10080`). Bunryu generates
-`goryu.json` and polls the status API for per-leg telemetry.
+`goryu.json` and polls the status API for per-leg telemetry. Bunryu does not use
+the optional [`output_passphrase`](../2-usage/1-configuration.md#destination-passphrase):
+the SRS it forwards to shares the one passphrase, and Bunryu's installer rewrites
+`goryu.json` from its own copy on every update, so a key added by hand would be lost.
 
 ## Limits
 
