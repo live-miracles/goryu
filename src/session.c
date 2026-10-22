@@ -263,7 +263,7 @@ static void handle_output_send_failure(const output_target_t *target, int state_
 }
 
 static void *session_main(void *arg) {
-    session_args_t *args = (session_args_t *)arg;
+    session_args_t *args = arg;
     SRTSOCKET conn = args->conn;
     const output_target_t *target = args->target;
     int tracker_slot = args->tracker_slot;
@@ -366,7 +366,7 @@ static void *session_main(void *arg) {
 
 void session_spawn(SRTSOCKET conn, const output_target_t *target,
                    const struct sockaddr_storage *peer) {
-    session_args_t *args = (session_args_t *)calloc(1, sizeof *args);
+    session_args_t *args = calloc(1, sizeof *args);
     if (!args) {
         set_last_errorf("calloc(session): %s", strerror(errno));
         relay_logf("calloc(session): %s\n", strerror(errno));

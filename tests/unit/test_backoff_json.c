@@ -79,7 +79,7 @@ static void test_escaping(void) {
 }
 
 static void test_escaping_long_string(void) {
-    char *long_s = (char *)malloc(100001);
+    char *long_s = malloc(100001);
     memset(long_s, '"', 100000);
     long_s[100000] = '\0';
     char *r = escaped(long_s);

@@ -323,7 +323,7 @@ static int read_file(const char *path, char **buf_out) {
         return -1;
     }
     rewind(f);
-    char *buf = (char *)calloc((size_t)len + 1, 1);
+    char *buf = calloc((size_t)len + 1, 1);
     if (!buf) {
         fclose(f);
         return -1;
