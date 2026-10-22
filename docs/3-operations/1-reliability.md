@@ -58,6 +58,13 @@ per second for 16 minutes, which loaded a small host enough to starve
 `systemd-journald` and take down its SSH and networking. The cap makes that
 failure structurally impossible whatever triggers the next burst.
 
+## Refused SRT options
+
+Every SRT option Goryu applies is checked, and a refusal stops the relay at
+startup. An earlier version ignored libsrt's refusal of a too-short passphrase, so
+a configured but invalid passphrase left the whole relay, input and output,
+running without encryption and accepting callers that sent none.
+
 ## Status endpoint
 
 The status HTTP server runs on its own thread and binds to `127.0.0.1` only.

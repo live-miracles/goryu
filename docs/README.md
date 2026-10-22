@@ -4,10 +4,13 @@
 
 - [Introduction](1-getting-started/1-introduction.md): what it is, how bonded and plain SRT are handled, limits
 - [Install](1-getting-started/2-install.md): release download, systemd, firewall port
+- [Alternatives](1-getting-started/3-alternatives.md): native server bonding, SRTLA, vendor bonding, and when Goryu is the right tool
 
 ## Usage
 
 - [Configuration](2-usage/1-configuration.md): command line, `goryu.json`, streamid routing, passphrase
+- [Sending bonded SRT](2-usage/2-sending-bonded-srt.md): what a sender must do, what can send one, a test caller you can run today
+- [Downstream servers](2-usage/3-downstream-servers.md): SRS, MediaMTX and Restreamer behind Goryu, with the streamid each expects
 
 ## Operations
 

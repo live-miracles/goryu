@@ -87,12 +87,10 @@ one, the connection is refused and retried like any rejecting downstream (see
 [Reliability](../3-operations/1-reliability.md#downstream-retry)).
 
 libsrt accepts only 10 to 79 bytes. Goryu checks the length at startup and
-refuses to run otherwise: an earlier version ignored libsrt's refusal, so a
-configured but too-short passphrase left the whole relay, input and output,
-running without encryption and accepting callers that sent no passphrase. Every
-SRT option Goryu applies is now checked in the same way, so a refused option stops
-the relay at startup instead of being ignored. The passphrase is not written to
-the log; see [Architecture](../4-reference/2-architecture.md#logging).
+refuses to run otherwise, and every other SRT option it applies is checked the same
+way, so a refused option stops the relay instead of being ignored (the
+[reason](../3-operations/1-reliability.md#refused-srt-options)). The passphrase is
+not written to the log; see [Architecture](../4-reference/2-architecture.md#logging).
 
 The two-URI command line follows the same rule for a `passphrase` in either URI.
 

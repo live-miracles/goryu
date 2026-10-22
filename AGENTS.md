@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Goryu is a small SRT bonding relay for Linux: one C binary (about 2,000 lines on
+Goryu is a small SRT bonding relay for Linux: one C binary (about 2,600 lines on
 top of libsrt 1.5.6) with a JSON config of six fields (plus an optional destination passphrase) and a loopback JSON status
 API. It accepts a bonded SRT socket group, or an ordinary single-link SRT
 caller, on one listener, merges the legs into one deduplicated MPEG-TS stream and
@@ -130,6 +130,10 @@ Search `docs/` and `README.md` for the name of the thing.
   `docs/3-operations/1-reliability.md` and the Limits table in
   `docs/1-getting-started/1-introduction.md`.
 - **Config fields and command line** live in `docs/2-usage/1-configuration.md`.
+- **Sender and server recipes** (what can send a bonded group, streamids and ports per
+  downstream server, the tested versions) live in `docs/2-usage/2-sending-bonded-srt.md`
+  and `docs/2-usage/3-downstream-servers.md`; re-run the test and update the versions
+  when you claim a new server works.
 - **Threads, session table, stats collection** live in
   `docs/4-reference/2-architecture.md`.
 - **Build, CI, release and pinned inputs** live in
