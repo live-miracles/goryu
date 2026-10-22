@@ -98,9 +98,10 @@ Navigation only; correct an entry when a change makes it stale.
   `test-docker.sh`, `format.sh`. `tests/unit/` holds the unit tests and `tests/e2e/` the bonded test caller.
 - `docker/` - `Dockerfile` (runtime image that installs a published release; not the
   build image above), `compose.yaml` (MediaMTX + Goryu, and a bonded test sender under
-  the `demo` profile), `goryu.json` (its example config), `demo-sender/`.
+  the `demo` profile), `goryu.json` (its example config), `README.dockerhub.md` (the Docker
+  Hub description), `demo-sender/`.
 - `.github/workflows/` - `ci.yml` (format, unit, smoke, end-to-end and Docker image tests), `release.yml`
-  (tag must equal `VERSION`; builds, attests, publishes).
+  (tag must equal `VERSION`; builds, attests, publishes the release, then the Docker image).
 - `docs/` - numbered section folders of numbered pages, indexed by
   `docs/README.md`; `README.md` is the short pitch and quick start.
 

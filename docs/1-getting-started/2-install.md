@@ -76,15 +76,21 @@ bound to `127.0.0.1` and must stay closed to the network.
 
 `docker/` holds a runtime image and a compose example. The image installs a published
 release and checks it against `checksums.sha256`, runs as an unprivileged user, and
-stops cleanly on `docker stop`. It is linux/amd64 only, like the release, and there is
-no published image yet: build it.
+stops cleanly on `docker stop`. It is linux/amd64 only, like the release. From v3.4.0 each
+release publishes it as `nandisha0/goryu` on Docker Hub and `ghcr.io/live-miracles/goryu`,
+tagged `X.Y.Z`, `X.Y` and `latest`; pin an exact version for anything long-lived.
+
+```bash
+docker run -d --name goryu --network host --restart unless-stopped \
+  -v "$PWD/goryu.json:/etc/goryu/goryu.json:ro" nandisha0/goryu:3.4.0
+curl http://127.0.0.1:8081/status
+```
+
+To build it yourself instead (the image installs a published release):
 
 ```bash
 docker build -t goryu docker                                             # newest release
-docker build --build-arg GORYU_VERSION=v3.3.0 -t goryu:v3.3.0 docker     # a pinned one
-docker run -d --name goryu --network host --restart unless-stopped \
-  -v "$PWD/goryu.json:/etc/goryu/goryu.json:ro" goryu
-curl http://127.0.0.1:8081/status
+docker build --build-arg GORYU_VERSION=v3.4.0 -t goryu:v3.4.0 docker     # a pinned one
 ```
 
 Use host networking: the status API listens on `127.0.0.1` inside the container, so a

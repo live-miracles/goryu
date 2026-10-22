@@ -80,6 +80,15 @@ requests:
   then `scripts/test-e2e.sh`.
 - **Docker image:** `scripts/test-docker.sh`.
 
+The release workflow (`release.yml`) runs that CI, builds and attests the archive,
+publishes the GitHub Release, and then builds `docker/Dockerfile` for that tag and
+pushes it to GHCR and, when the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets
+are set, Docker Hub (`nandisha0/goryu`, description synced from
+`docker/README.dockerhub.md`). The image job runs after the release because the image
+installs it, and it checks that the pushed image reports the tag's version. If it
+fails, the release stays published; re-run the job, since a published release is never
+overwritten.
+
 ## Versioning
 
 The version lives in the `VERSION` file (for example `v3.2.0`) and is embedded
