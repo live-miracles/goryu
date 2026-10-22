@@ -30,7 +30,7 @@ A relay may be carrying a live stream. Look, don't touch.
 |---|---|
 | Status API | `http://127.0.0.1:<status_port>/status` (8081 by default) |
 | Process logs | stdout/stderr, so journald under the unit that runs it (`goryu.service` in the install docs and in Bunryu) |
-| Config | the path given on the command line, six keys, may hold the passphrase |
+| Config | the path given on the command line (six keys and an optional `output_passphrase`); holds the passphrase(s) |
 | Version | `LD_LIBRARY_PATH=<dir>/lib <dir>/bin/goryu --version`; compare with the latest tag |
 
 ## Recipes

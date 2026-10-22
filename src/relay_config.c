@@ -108,8 +108,8 @@ static const char *skip_ws(const char *p) {
 }
 
 /* Finds "key": and returns the position of its value, or NULL. This is a text
- * search, not a JSON parser: the file is documented to be a flat object of six
- * keys (docs/2-usage/1-configuration.md). */
+ * search, not a JSON parser: the file is documented to be a flat object of the keys
+ * in docs/2-usage/1-configuration.md. */
 static const char *json_find_value(const char *json, const char *key) {
     char needle[128];
     snprintf(needle, sizeof needle, "\"%s\"", key);
@@ -267,15 +267,14 @@ void redact_srt_uri(const char *uri, char *out, size_t out_sz) {
     out[used] = '\0';
 }
 
-int check_passphrase(const char *passphrase, char *err, size_t err_sz) {
+int check_passphrase(const char *key, const char *passphrase, char *err, size_t err_sz) {
     size_t len = strlen(passphrase);
     if (len == 0) return 0;
     if (len >= PASSPHRASE_MIN_LEN && len <= PASSPHRASE_MAX_LEN) return 0;
     if (err && err_sz > 0) {
         snprintf(err, err_sz,
-                 "\"passphrase\" must be %d to %d characters (got %zu); use \"\" to disable "
-                 "encryption",
-                 PASSPHRASE_MIN_LEN, PASSPHRASE_MAX_LEN, len);
+                 "\"%s\" must be %d to %d characters (got %zu); use \"\" to disable encryption",
+                 key, PASSPHRASE_MIN_LEN, PASSPHRASE_MAX_LEN, len);
     }
     return -1;
 }
@@ -305,9 +304,21 @@ int parse_config_json(const char *json, file_config_t *cfg, char *err, size_t er
         FAIL_KEY("status_port");
     if (!json_get_string(json, "passphrase", cfg->passphrase, sizeof cfg->passphrase))
         FAIL_KEY("passphrase");
+
+    /* Optional. Present means the downstream has its own passphrase, "" included;
+     * a key that is present but not a string is an error, not "absent". */
+    if (json_find_value(json, "output_passphrase")) {
+        if (!json_get_string(json, "output_passphrase", cfg->output_passphrase,
+                             sizeof cfg->output_passphrase))
+            FAIL_KEY("output_passphrase");
+        cfg->output_passphrase_explicit = 1;
+    } else {
+        snprintf(cfg->output_passphrase, sizeof cfg->output_passphrase, "%s", cfg->passphrase);
+    }
 #undef FAIL_KEY
 
-    if (check_passphrase(cfg->passphrase, err, err_sz) != 0) return -1;
+    if (check_passphrase("passphrase", cfg->passphrase, err, err_sz) != 0) return -1;
+    if (check_passphrase("output_passphrase", cfg->output_passphrase, err, err_sz) != 0) return -1;
     return 0;
 }
 

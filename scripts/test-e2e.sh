@@ -65,9 +65,11 @@ ports() { # ports <scenario-number>: sets IN OUT STATUS
     STATUS=$((BASE_PORT + $1 * 10 + 3))
 }
 
-write_config() { # write_config <file> <passphrase>
-    printf '{"input_host":"127.0.0.1","input_port":%d,"output_host":"127.0.0.1","output_port":%d,"status_port":%d,"passphrase":"%s"}\n' \
-        "$IN" "$OUT" "$STATUS" "$2" >"$1"
+write_config() { # write_config <file> <passphrase> [<output_passphrase>]
+    local extra=""
+    (($# >= 3)) && extra=",\"output_passphrase\":\"$3\""
+    printf '{"input_host":"127.0.0.1","input_port":%d,"output_host":"127.0.0.1","output_port":%d,"status_port":%d,"passphrase":"%s"%s}\n' \
+        "$IN" "$OUT" "$STATUS" "$2" "$extra" >"$1"
 }
 
 status() { curl -fsS --max-time 2 "http://127.0.0.1:$STATUS/status"; }
@@ -373,6 +375,51 @@ scenario_uri_mode() {
     check "the log shows the redacted output URI" log_has "passphrase=<redacted>" "$WORK/g.log"
 }
 
+scenario_output_passphrase() {
+    ports 20
+    local p1="$PASSPHRASE" p2="other-passphrase-4567"
+    # output_passphrase_case <label> <input-pass> <output-pass or -> <sink-pass> <publisher-pass> <flows|blocked>
+    # "-" leaves output_passphrase out of the config, so it defaults to the input's.
+    output_passphrase_case() {
+        local label="$1" in_pass="$2" out_pass="$3" sink_pass="$4" pub_pass="$5" expect="$6"
+        kill_pids 2>/dev/null
+        : >"$WORK/g.log"
+        if [[ "$out_pass" == "-" ]]; then
+            write_config "$WORK/c.json" "$in_pass"
+        else
+            write_config "$WORK/c.json" "$in_pass" "$out_pass"
+        fi
+        start_sink "$sink_pass"
+        start_goryu "$WORK/c.json" "$WORK/g.log"
+        start_pub "demo/op" "$pub_pass"
+        if [[ "$expect" == flows ]]; then
+            check "$label: the stream reaches the destination" wait_for 12 active_and_connected demo/op
+            check "$label: bytes keep growing" forwarding demo/op
+        else
+            check "$label: the encoder is accepted" wait_for 10 active demo/op
+            sleep 7
+            check "$label: the destination is refused and retried" field_ge demo/op .retryFailures 1
+            check "$label: and never connects" field_is demo/op .outputConnected false
+        fi
+        check "$label: neither passphrase is in the relay's log" bash -c \
+            "! grep -qE '$p1|$p2' '$WORK/g.log'"
+    }
+
+    output_passphrase_case "encrypted input, plain destination" "$p1" "" "" "$p1" flows
+    output_passphrase_case "a different passphrase on each side" "$p1" "$p2" "$p2" "$p1" flows
+    output_passphrase_case "plain input, encrypted destination" "" "$p2" "$p2" "" flows
+    output_passphrase_case "no output_passphrase: the destination uses the input's" "$p1" - "$p1" "$p1" flows
+    output_passphrase_case "an empty output_passphrase does not fall back to the input's" "$p1" "" "$p1" "$p1" blocked
+    output_passphrase_case "the destination uses its own passphrase, not the input's" "$p1" "$p2" "$p1" "$p1" blocked
+
+    kill_pids 2>/dev/null
+    write_config "$WORK/bad.json" "$p1" "short"
+    check "a too-short output_passphrase is refused" bash -c \
+        "LD_LIBRARY_PATH='$LIB_DIR' timeout 5 '$BIN' '$WORK/bad.json' >'$WORK/bad.log' 2>&1; [ \$? -eq 1 ]"
+    check "the error names output_passphrase and not its value" bash -c \
+        "grep -q 'output_passphrase' '$WORK/bad.log' && ! grep -qE 'short|$p1' '$WORK/bad.log'"
+}
+
 scenario_sigterm() {
     ports 8
     write_config "$WORK/c.json" ""
@@ -577,7 +624,7 @@ scenario_churn() {
 
 # --- run --------------------------------------------------------------------
 
-ALL=(cli bad_config uri_mode forward downstream_down duplicate takeover two_streams passphrase sigterm
+ALL=(cli bad_config uri_mode output_passphrase forward downstream_down duplicate takeover two_streams passphrase sigterm
     shutdown_silent churn bonded bonded_legs bonded_flap bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
     bonded_abrupt_end)
 SELECTED=("${@:-${ALL[@]}}")

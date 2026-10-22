@@ -33,13 +33,15 @@ port `8081`.
 | `output_host` | Downstream SRT server host |
 | `output_port` | Downstream SRT server port |
 | `status_port` | TCP port of the [status API](../4-reference/1-status-api.md), bound to `127.0.0.1` only |
-| `passphrase` | SRT passphrase for the input and the output, 10 to 79 characters; `""` disables encryption |
+| `passphrase` | SRT passphrase for the input, and for the output unless `output_passphrase` is set; 10 to 79 characters; `""` disables encryption |
+| `output_passphrase` | Optional. The passphrase for the downstream connection only: `""` for a downstream without encryption, or a different passphrase. Left out, the output uses `passphrase` |
 
-All six fields are required, the three ports must be whole numbers from 1 to 65535
-and the passphrase must be empty or 10 to 79 characters. Anything else makes
+The first six fields are required (`output_passphrase` is optional), the three ports
+must be whole numbers from 1 to 65535 and each passphrase must be empty or 10 to 79
+characters. Anything else makes
 Goryu exit at startup with `Bad config file <path>: <reason>` and a non-zero
 status, where the reason names the key (never its value). The parser reads a flat
-JSON object by key, so keep the file to these six keys and no comments. In a
+JSON object by key, so keep the file to these keys and no comments. In a
 string only the escapes `\"`, `\\` and `\/` are understood; any other is refused.
 
 In this mode the input listener runs `transtype=live` with `latency=240` ms and
@@ -61,9 +63,28 @@ Only one publisher per streamid is active at a time; see
 ## Passphrase
 
 When `passphrase` is set, Goryu sets `SRTO_PASSPHRASE` on the input listener and
-on the output connection, and leaves validation to libsrt's normal encrypted
-handshake. Encoders must use the same passphrase, and so must the downstream
-server. To run unencrypted end to end, use `""`.
+leaves validation to libsrt's normal encrypted handshake. Encoders must use the same
+passphrase. By default the output connection uses it too, so the downstream server
+needs the same one. To run unencrypted end to end, use `""`.
+
+### Destination passphrase
+
+The downstream server does not have to share the encoder's passphrase. Add
+`output_passphrase` to give the output connection its own:
+
+| `passphrase` | `output_passphrase` | Encoders to Goryu | Goryu to the downstream |
+|---|---|---|---|
+| `"A..."` | left out | encrypted with A | encrypted with A |
+| `"A..."` | `""` | encrypted with A | **not encrypted** |
+| `"A..."` | `"B..."` | encrypted with A | encrypted with B |
+| `""` | `"B..."` | not encrypted | encrypted with B |
+
+The usual case is a downstream on the same host or a trusted network that does not
+use a passphrase, while the encoders cross the internet. Leaving the key out keeps
+the earlier behavior, so existing configs are unchanged. An empty `output_passphrase`
+is deliberate and does not fall back to `passphrase`: if the downstream still requires
+one, the connection is refused and retried like any rejecting downstream (see
+[Reliability](../3-operations/1-reliability.md#downstream-retry)).
 
 libsrt accepts only 10 to 79 bytes. Goryu checks the length at startup and
 refuses to run otherwise: an earlier version ignored libsrt's refusal, so a

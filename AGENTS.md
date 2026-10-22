@@ -3,7 +3,7 @@
 ## Project overview
 
 Goryu is a small SRT bonding relay for Linux: one C binary (about 2,000 lines on
-top of libsrt 1.5.6) with a six-field JSON config and a loopback JSON status
+top of libsrt 1.5.6) with a JSON config of six fields (plus an optional destination passphrase) and a loopback JSON status
 API. It accepts a bonded SRT socket group, or an ordinary single-link SRT
 caller, on one listener, merges the legs into one deduplicated MPEG-TS stream and
 forwards it to a downstream SRT server under the same `streamid`.
@@ -26,7 +26,8 @@ Bunryu is a consumer you cannot see from this repo, so these are interfaces:
   leg disappears from `legs[]`). Adding a field is safe; renaming, removing or
   changing the meaning or nullability of one is a breaking change that needs a
   major version and a note to the Bunryu side.
-- **The six `goryu.json` keys** and the two-URI command line.
+- **The `goryu.json` keys** (six required, and the optional `output_passphrase`) and the
+  two-URI command line.
 
 ## Highest priority: stability and reliability
 

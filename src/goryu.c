@@ -69,7 +69,7 @@ static int check_uri_passphrase(const char *query, const char *which) {
     char pass[512];
     char err[256];
     if (get_param(query, "passphrase", pass, sizeof pass) &&
-        check_passphrase(pass, err, sizeof err) != 0) {
+        check_passphrase("passphrase", pass, err, sizeof err) != 0) {
         relay_logf("Bad %s URI: %s\n", which, err);
         return -1;
     }
@@ -90,7 +90,7 @@ static int read_args(int argc, char *argv[], relay_args_t *args) {
         if (build_srt_uri(args->input_uri, sizeof args->input_uri, file_cfg.input_host,
                           file_cfg.input_port, file_cfg.passphrase, 1) != 0 ||
             build_srt_uri(args->output_uri, sizeof args->output_uri, file_cfg.output_host,
-                          file_cfg.output_port, file_cfg.passphrase, 0) != 0) {
+                          file_cfg.output_port, file_cfg.output_passphrase, 0) != 0) {
             relay_logf("Bad config file %s: failed to build SRT URI\n", argv[1]);
             return -1;
         }

@@ -96,7 +96,9 @@ look for when you run one by hand. Compare against
   (`start_silent_pub`); copy that. The log then shows
   `Duplicate publisher takeover for stale streamid=...` and the old session closes.
 - **Passphrase**: set the same `passphrase` (10 to 79 characters) in `goryu.json`,
-  on the encoder and on the downstream listener. A wrong one is rejected inside
+  on the encoder and on the downstream listener. The downstream can differ: add
+  `"output_passphrase": ""` (downstream not encrypted) or another passphrase, and give
+  the downstream listener that one; leave the key out and it uses `passphrase`. A wrong one is rejected inside
   libsrt and leaves no Goryu log line, by design. A passphrase outside 10 to 79
   characters makes the relay refuse to start. The passphrase must never appear in
   the relay's log.

@@ -17,6 +17,12 @@ typedef struct file_config {
     int output_port;
     int status_port;
     char passphrase[256];
+    /* The passphrase for the downstream connection. It is the optional key
+     * "output_passphrase" in goryu.json; without that key it is a copy of
+     * passphrase, so one passphrase covers both sides. An explicit "" means the
+     * downstream is not encrypted. */
+    char output_passphrase[256];
+    int output_passphrase_explicit;
 } file_config_t;
 
 int parse_uri(const char *uri, char *scheme, size_t scheme_sz, char *host, size_t host_sz,
@@ -30,10 +36,12 @@ int build_srt_uri(char *out, size_t out_sz, const char *host, int port, const ch
 void redact_srt_uri(const char *uri, char *out, size_t out_sz);
 
 /* Returns 0 for an empty passphrase or one of 10 to 79 bytes. Otherwise -1,
- * with a message in err that states the length and never the passphrase. */
-int check_passphrase(const char *passphrase, char *err, size_t err_sz);
+ * with a message in err that names the key (for example "passphrase" or
+ * "output_passphrase") and states the length, never the passphrase. */
+int check_passphrase(const char *key, const char *passphrase, char *err, size_t err_sz);
 
-/* Parses the flat JSON object of six keys that goryu.json holds. Returns 0, or
+/* Parses the flat JSON object that goryu.json holds: six required keys and the
+ * optional output_passphrase. Returns 0, or
  * -1 with a one-line reason in err (when err is not NULL). The reason names the
  * offending key, never a value, so it is safe to log. */
 int parse_config_json(const char *json, file_config_t *cfg, char *err, size_t err_sz);

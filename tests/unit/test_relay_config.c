@@ -150,12 +150,14 @@ static void test_passphrase_error_message(void) {
 
 static void test_check_passphrase(void) {
     char err[128];
-    CHECK(check_passphrase("", NULL, 0) == 0);
-    CHECK(check_passphrase("123456789", err, sizeof err) == -1);
-    CHECK(check_passphrase("1234567890", err, sizeof err) == 0);
+    CHECK(check_passphrase("passphrase", "", NULL, 0) == 0);
+    CHECK(check_passphrase("passphrase", "123456789", err, sizeof err) == -1);
+    CHECK(check_passphrase("passphrase", "1234567890", err, sizeof err) == 0);
     /* length is counted in bytes, as libsrt does: 5 x 2-byte characters = 10 */
-    CHECK(check_passphrase("\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9", err, sizeof err) == 0);
-    CHECK(check_passphrase("\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9", err, sizeof err) == -1);
+    CHECK(check_passphrase("passphrase", "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9", err,
+                           sizeof err) == 0);
+    CHECK(check_passphrase("passphrase", "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9", err, sizeof err) ==
+          -1);
 }
 
 static void test_passphrase_escapes(void) {
@@ -423,6 +425,133 @@ static void test_redacting_a_built_uri(void) {
     CHECK(strstr(red, "passphrase=<redacted>&pbkeylen=16") != NULL);
 }
 
+/* ---- output_passphrase ---- */
+
+#define OUT_FMT                                                                                    \
+    "{\"input_host\":\"0.0.0.0\",\"input_port\":10081,\"output_host\":\"127.0.0.1\","              \
+    "\"output_port\":10080,\"status_port\":8081,\"passphrase\":\"%s\"%s}"
+
+static int parse_out(const char *passphrase, const char *extra, file_config_t *cfg, char *err,
+                     size_t err_sz) {
+    char json[1024];
+    snprintf(json, sizeof json, OUT_FMT, passphrase, extra);
+    return parse_config_json(json, cfg, err, err_sz);
+}
+
+static void test_output_passphrase_defaults_to_the_input_passphrase(void) {
+    file_config_t cfg;
+    CHECK(parse_out("abcdefghij12", "", &cfg, NULL, 0) == 0);
+    CHECK_STR(cfg.output_passphrase, "abcdefghij12");
+    CHECK(cfg.output_passphrase_explicit == 0);
+    /* no encryption on the input means none on the output either */
+    CHECK(parse_out("", "", &cfg, NULL, 0) == 0);
+    CHECK_STR(cfg.output_passphrase, "");
+    CHECK(cfg.output_passphrase_explicit == 0);
+}
+
+static void test_output_passphrase_can_be_empty_or_different(void) {
+    file_config_t cfg;
+    /* encrypted input, plain downstream */
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":\"\"", &cfg, NULL, 0) == 0);
+    CHECK_STR(cfg.passphrase, "abcdefghij12");
+    CHECK_STR(cfg.output_passphrase, "");
+    CHECK(cfg.output_passphrase_explicit == 1);
+    /* a different downstream passphrase */
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":\"zyxwvutsrq99\"", &cfg, NULL, 0) == 0);
+    CHECK_STR(cfg.passphrase, "abcdefghij12");
+    CHECK_STR(cfg.output_passphrase, "zyxwvutsrq99");
+    /* plain input, encrypted downstream */
+    CHECK(parse_out("", ",\"output_passphrase\":\"zyxwvutsrq99\"", &cfg, NULL, 0) == 0);
+    CHECK_STR(cfg.passphrase, "");
+    CHECK_STR(cfg.output_passphrase, "zyxwvutsrq99");
+    /* the same value written out is explicit, and equal */
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":\"abcdefghij12\"", &cfg, NULL, 0) == 0);
+    CHECK(cfg.output_passphrase_explicit == 1);
+}
+
+static void test_output_passphrase_is_not_confused_with_passphrase(void) {
+    file_config_t cfg;
+    /* the key written first, and in the middle of the object */
+    const char *first = "{\"output_passphrase\":\"\",\"input_host\":\"a\",\"input_port\":1,"
+                        "\"output_host\":\"a\",\"output_port\":1,\"status_port\":1,"
+                        "\"passphrase\":\"abcdefghij12\"}";
+    CHECK(parse_config_json(first, &cfg, NULL, 0) == 0);
+    CHECK_STR(cfg.passphrase, "abcdefghij12");
+    CHECK_STR(cfg.output_passphrase, "");
+    /* only output_passphrase present: passphrase is still required */
+    const char *only = "{\"output_passphrase\":\"abcdefghij12\",\"input_host\":\"a\","
+                       "\"input_port\":1,\"output_host\":\"a\",\"output_port\":1,"
+                       "\"status_port\":1}";
+    char err[256] = "";
+    CHECK(parse_config_json(only, &cfg, err, sizeof err) == -1);
+    CHECK(strstr(err, "\"passphrase\"") != NULL);
+}
+
+static void test_output_passphrase_is_validated(void) {
+    file_config_t cfg;
+    char err[256];
+    for (int len = 0; len <= 100; ++len) {
+        char pass[128], extra[256];
+        repeat(pass, 'Q', len);
+        snprintf(extra, sizeof extra, ",\"output_passphrase\":\"%s\"", pass);
+        err[0] = '\0';
+        int rc = parse_out("abcdefghij12", extra, &cfg, err, sizeof err);
+        int allowed = len == 0 || (len >= PASSPHRASE_MIN_LEN && len <= PASSPHRASE_MAX_LEN);
+        CHECK((rc == 0) == allowed);
+        if (!allowed) {
+            CHECK(strstr(err, "\"output_passphrase\"") != NULL); /* names the right key */
+            CHECK(strstr(err, pass) == NULL);                    /* and never the value */
+        }
+    }
+    /* the input passphrase is still checked when the output one is fine */
+    CHECK(parse_out("short", ",\"output_passphrase\":\"zyxwvutsrq99\"", &cfg, err, sizeof err) ==
+          -1);
+    CHECK(strstr(err, "\"passphrase\" must be") != NULL);
+    /* a short value is not echoed, and not the other key's name */
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":\"tiny\"", &cfg, err, sizeof err) ==
+          -1);
+    CHECK(strstr(err, "tiny") == NULL);
+    CHECK(strstr(err, "got 4") != NULL);
+}
+
+static void test_output_passphrase_wrong_types_are_errors(void) {
+    file_config_t cfg;
+    char err[256] = "";
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":null", &cfg, err, sizeof err) == -1);
+    CHECK(strstr(err, "output_passphrase") != NULL);
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":12345678901", &cfg, NULL, 0) == -1);
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":true", &cfg, NULL, 0) == -1);
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":\"unterminated", &cfg, NULL, 0) == -1);
+    /* unsupported escapes are refused here too, not read as a different string */
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":\"abcdefgh\\n12\"", &cfg, NULL, 0) ==
+          -1);
+    /* ...while an escaped backslash is a valid character of the passphrase */
+    CHECK(parse_out("abcdefghij12", ",\"output_passphrase\":\"abcdefgh\\\\n12\"", &cfg, NULL, 0) ==
+          0);
+    CHECK_STR(cfg.output_passphrase, "abcdefgh\\n12");
+}
+
+static void test_each_side_gets_its_own_uri_passphrase(void) {
+    file_config_t cfg;
+    char in_uri[512], out_uri[512], red[512];
+    CHECK(parse_out("inputpass-123", ",\"output_passphrase\":\"outputpass-456\"", &cfg, NULL, 0) ==
+          0);
+    CHECK(build_srt_uri(in_uri, sizeof in_uri, "0.0.0.0", 10081, cfg.passphrase, 1) == 0);
+    CHECK(build_srt_uri(out_uri, sizeof out_uri, "127.0.0.1", 10080, cfg.output_passphrase, 0) ==
+          0);
+    CHECK(strstr(in_uri, "passphrase=inputpass-123&pbkeylen=16") != NULL);
+    CHECK(strstr(out_uri, "passphrase=outputpass-456&pbkeylen=16") != NULL);
+    CHECK(strstr(in_uri, "outputpass") == NULL && strstr(out_uri, "inputpass") == NULL);
+    /* a plain downstream has no passphrase parameter at all */
+    CHECK(parse_out("inputpass-123", ",\"output_passphrase\":\"\"", &cfg, NULL, 0) == 0);
+    CHECK(build_srt_uri(out_uri, sizeof out_uri, "127.0.0.1", 10080, cfg.output_passphrase, 0) ==
+          0);
+    CHECK(strstr(out_uri, "passphrase") == NULL && strstr(out_uri, "pbkeylen") == NULL);
+    /* both stay out of the log */
+    redact_srt_uri(in_uri, red, sizeof red);
+    CHECK(strstr(red, "inputpass") == NULL);
+}
+
 int main(void) {
     test_valid_config();
     test_pretty_printed_config();
@@ -447,5 +576,11 @@ int main(void) {
     test_build_srt_uri_truncation_is_an_error();
     test_redact_srt_uri();
     test_redacting_a_built_uri();
+    test_output_passphrase_defaults_to_the_input_passphrase();
+    test_output_passphrase_can_be_empty_or_different();
+    test_output_passphrase_is_not_confused_with_passphrase();
+    test_output_passphrase_is_validated();
+    test_output_passphrase_wrong_types_are_errors();
+    test_each_side_gets_its_own_uri_passphrase();
     TEST_SUMMARY("relay_config");
 }
