@@ -228,7 +228,25 @@ static void test_load_config_file(void) {
     fclose(f);
     CHECK(load_config_file(path, &cfg, err, sizeof err) == -1);
     remove(path);
-    CHECK(load_config_file("/tmp", &cfg, err, sizeof err) == -1); /* a directory */
+    /* Not regular files: a directory (ftell reports LONG_MAX on some filesystems,
+     * which used to become a huge allocation), a device that never ends, a pipe. */
+    CHECK(load_config_file("/tmp", &cfg, err, sizeof err) == -1);
+    CHECK(load_config_file(".", &cfg, err, sizeof err) == -1);
+    CHECK(load_config_file("/dev/zero", &cfg, err, sizeof err) == -1);
+    CHECK(strstr(err, "cannot read") != NULL);
+
+    /* A config is a few hundred bytes; an oversized file is refused, not slurped. */
+    char big_path[] = "/tmp/goryu-unit-big-XXXXXX";
+    fd = mkstemp(big_path);
+    CHECK(fd >= 0);
+    if (fd < 0) return;
+    f = fdopen(fd, "w");
+    fprintf(f, CFG_FMT, "10081", "");
+    for (int i = 0; i < 70000; ++i)
+        fputc(' ', f);
+    fclose(f);
+    CHECK(load_config_file(big_path, &cfg, err, sizeof err) == -1);
+    remove(big_path);
 }
 
 /* ---- URIs ---- */

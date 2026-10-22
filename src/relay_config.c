@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* fmt must contain exactly one %s. */
 static void set_err(char *err, size_t err_sz, const char *fmt, const char *arg) {
@@ -310,25 +311,26 @@ int parse_config_json(const char *json, file_config_t *cfg, char *err, size_t er
     return 0;
 }
 
+/* A config is a few hundred bytes. Refuse anything that is not a regular file
+ * (a directory reports a size of LONG_MAX on some filesystems, /dev/zero never
+ * ends) and anything over this limit, instead of trusting the size. */
+#define MAX_CONFIG_BYTES (64 * 1024)
+
 static int read_file(const char *path, char **buf_out) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
-    if (fseek(f, 0, SEEK_END) != 0) {
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > MAX_CONFIG_BYTES) {
         fclose(f);
         return -1;
     }
-    long len = ftell(f);
-    if (len < 0) {
-        fclose(f);
-        return -1;
-    }
-    rewind(f);
-    char *buf = calloc((size_t)len + 1, 1);
+    size_t len = (size_t)st.st_size;
+    char *buf = calloc(len + 1, 1);
     if (!buf) {
         fclose(f);
         return -1;
     }
-    if (fread(buf, 1, (size_t)len, f) != (size_t)len) {
+    if (fread(buf, 1, len, f) != len) {
         free(buf);
         fclose(f);
         return -1;
@@ -342,7 +344,7 @@ static int read_file(const char *path, char **buf_out) {
 int load_config_file(const char *path, file_config_t *cfg, char *err, size_t err_sz) {
     char *json = NULL;
     if (read_file(path, &json) != 0) {
-        set_err(err, err_sz, "cannot read %s", path);
+        set_err(err, err_sz, "cannot read %s (not a regular file, or over 64 KiB)", path);
         return -1;
     }
     int rc = parse_config_json(json, cfg, err, err_sz);

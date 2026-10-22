@@ -222,6 +222,8 @@ scenario_cli() {
         "out=\$(LD_LIBRARY_PATH='$LIB_DIR' '$BIN' 2>&1); [ \$? -eq 1 ] && echo \"\$out\" | grep -q Usage:"
     check "missing config file exits 1" bash -c \
         "LD_LIBRARY_PATH='$LIB_DIR' '$BIN' '$WORK/nope.json' >/dev/null 2>&1; [ \$? -eq 1 ]"
+    check "a directory as the config file exits 1" bash -c \
+        "LD_LIBRARY_PATH='$LIB_DIR' '$BIN' '$WORK' >/dev/null 2>&1; [ \$? -eq 1 ]"
 }
 
 scenario_bad_config() {
