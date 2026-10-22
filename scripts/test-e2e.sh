@@ -399,6 +399,8 @@ scenario_bonded() {
     check "the input is reported as bonded" field_is demo/bond .input.bonded true
     check "a bonded input has no single peer" field_is demo/bond '.input.peer == null' true
     check "both legs are listed" wait_for 8 leg_count_is demo/bond 2
+    check "each leg's arrival is logged" bash -c \
+        "grep -q 'Bonded leg joined streamid=demo/bond leg=127.0.0.1:.* legs=' '$WORK/g.log' && grep -q 'Bonded leg joined streamid=demo/bond leg=127.0.0.2:.* legs=2' '$WORK/g.log'"
     check "both legs are running" field_is demo/bond '[.input.legs[].state] | unique | join(",")' running
     check "each leg has its own source address" field_is demo/bond '[.input.legs[].ip] | sort | join(",")' 127.0.0.1,127.0.0.2
     check "each leg has received data" field_is demo/bond '[.input.legs[].recvUniquePacketsTotal > 0] | all' true
@@ -411,6 +413,9 @@ scenario_bonded() {
     check "the relay forwards each packet once, not once per leg" forwarded_once_not_per_leg demo/bond
     check "a leg that goes down disappears from legs[]" wait_for 15 leg_count_is demo/bond 1
     check "the remaining leg is the one that was not dropped" field_is demo/bond '.input.legs[0].ip' 127.0.0.1
+    check "the lost leg is logged with its address and the legs left" wait_for 5 log_has "Bonded leg left streamid=demo/bond leg=127.0.0.2:[0-9]* legs=1" "$WORK/g.log"
+    check "exactly two joins were logged, none for a leg that stayed" bash -c \
+        "[ \$(grep -c 'Bonded leg joined streamid=demo/bond' '$WORK/g.log') -eq 2 ] && [ \$(grep -c 'Bonded leg left streamid=demo/bond' '$WORK/g.log') -eq 1 ]"
     check "the stream is still bonded and active" field_is demo/bond '[.input.bonded, .inputActive] | all' true
     check "forwarding continues on the surviving leg" forwarding demo/bond
     kill "$PUB_PID" 2>/dev/null
@@ -427,6 +432,7 @@ scenario_bonded_legs() {
     check "a group with a single leg is already bonded" wait_for 10 field_is demo/legs .input.bonded true
     check "it starts with one leg" wait_for 5 leg_count_is demo/legs 1
     check "a leg that joins later is added to the same stream" wait_for 15 leg_count_is demo/legs 2
+    check "the late leg's arrival is logged with the new leg count" wait_for 5 log_has "Bonded leg joined streamid=demo/legs leg=127.0.0.2:[0-9]* legs=2" "$WORK/g.log"
     check "there is still only one stream" stream_count_is 1
     check "the relay logged one accepted session per leg connection" bash -c "[ \$(grep -c 'Accepted bonded' '$WORK/g.log') -ge 1 ]"
     check "forwarding continues with the extra leg" forwarding demo/legs
@@ -521,6 +527,23 @@ scenario_shutdown_silent() {
     check "and exits with status 0" test "$rc" -eq 0
 }
 
+scenario_bonded_flap() {
+    ports 19
+    write_config "$WORK/c.json" ""
+    start_sink
+    start_goryu "$WORK/c.json" "$WORK/g.log"
+    BOND_SECONDS=60 start_bonded demo/flap --locals 127.0.0.1,127.0.0.2 \
+        --flap-leg 1 --flap-interval 1.2 --flap-toggles 18
+    check "the flapping group is accepted" wait_for 10 active_and_connected demo/flap
+    check "the relay keeps forwarding while a leg flaps" forwarding demo/flap
+    # 2 joins at the start and about 18 changes: more than the 12 lines allowed per 30 s
+    check "the flapping is summarised once its window ends" wait_for 50 log_has \
+        "Bonded leg events suppressed streamid=demo/flap count=[0-9]*" "$WORK/g.log"
+    check "no more than 12 leg lines were written in that window" bash -c \
+        "[ \$(grep -cE 'Bonded leg (joined|left) streamid=demo/flap' '$WORK/g.log') -eq 12 ]"
+    check "the relay is still running and the stream is up" active demo/flap
+}
+
 scenario_churn() {
     ports 17
     write_config "$WORK/c.json" ""
@@ -555,7 +578,7 @@ scenario_churn() {
 # --- run --------------------------------------------------------------------
 
 ALL=(cli bad_config uri_mode forward downstream_down duplicate takeover two_streams passphrase sigterm
-    shutdown_silent churn bonded bonded_legs bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
+    shutdown_silent churn bonded bonded_legs bonded_flap bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
     bonded_abrupt_end)
 SELECTED=("${@:-${ALL[@]}}")
 

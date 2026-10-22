@@ -119,7 +119,9 @@ In `/status` you should see `bonded: true`, `peer: null`, two `legs[]` with thei
 addresses, `latencyMs: 240` (derived from the legs) and group-level
 `bandwidthMbps: null`. After 12 s one leg disappears from `legs[]` and
 `forwardedBytes` keeps growing. Other options: `--add-local IP --add-after SEC` (a leg
-joining later), `--passphrase`, `--latency`. To hold a group open without sending
+joining later), `--flap-leg I --flap-interval S --flap-toggles N` (a link going up and
+down), `--passphrase`, `--latency`. The relay log shows each change as
+`Bonded leg joined|left streamid=... leg=<ip>:<port> legs=N`. To hold a group open without sending
 media, feed the caller a FIFO that has had one clip written and is kept open (see
 `start_silent_bonded` in the e2e script).
 

@@ -5,11 +5,69 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "log.h"
 #include "runtime.h"
 
 static pthread_mutex_t g_streams_mu = PTHREAD_MUTEX_INITIALIZER;
 static relay_stream_state_t g_streams[MAX_ACTIVE_SESSIONS];
 static char g_last_error[LAST_ERROR_MAX];
+
+/* A bonded leg that joins or leaves is logged, at most this many lines per stream in
+ * a window; the rest are counted and summarised when the window ends. A bad link
+ * that reconnects every few seconds would otherwise write a line each time, for as
+ * long as it lasts. */
+#define LEG_LOG_MAX_PER_WINDOW 12
+#define LEG_LOG_WINDOW_MS 30000
+
+typedef struct leg_event {
+    int joined;
+    relay_leg_ref_t leg;
+} leg_event_t;
+
+static int leg_listed(const relay_leg_ref_t *list, int n, const char *ip, int port) {
+    for (int i = 0; i < n; ++i) {
+        if (list[i].port == port && strcmp(list[i].ip, ip) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Compares the legs of this reading with the last logged set, fills events with the
+ * ones to log (left first, then joined) and remembers the new set. Must hold the
+ * lock. */
+static int collect_leg_events(relay_stream_state_t *st, const relay_leg_state_t *legs,
+                              int leg_count, long long now, leg_event_t *events) {
+    relay_leg_ref_t now_set[MAX_GROUP_MEMBERS];
+    for (int i = 0; i < leg_count; ++i) {
+        snprintf(now_set[i].ip, sizeof now_set[i].ip, "%s", legs[i].ip);
+        now_set[i].port = legs[i].port;
+    }
+
+    leg_event_t all[2 * MAX_GROUP_MEMBERS];
+    int n = 0;
+    for (int i = 0; i < st->logged_leg_count; ++i) {
+        if (leg_listed(now_set, leg_count, st->logged_legs[i].ip, st->logged_legs[i].port))
+            continue;
+        all[n].joined = 0;
+        all[n++].leg = st->logged_legs[i];
+    }
+    for (int i = 0; i < leg_count; ++i) {
+        if (leg_listed(st->logged_legs, st->logged_leg_count, now_set[i].ip, now_set[i].port))
+            continue;
+        all[n].joined = 1;
+        all[n++].leg = now_set[i];
+    }
+
+    st->logged_leg_count = leg_count;
+    memcpy(st->logged_legs, now_set, sizeof(relay_leg_ref_t) * (size_t)leg_count);
+
+    int kept = 0;
+    for (int i = 0; i < n; ++i) {
+        if (rate_window_allow(&st->leg_log, now, LEG_LOG_MAX_PER_WINDOW, LEG_LOG_WINDOW_MS)) {
+            events[kept++] = all[i];
+        }
+    }
+    return kept;
+}
 
 void set_last_errorf(const char *fmt, ...) {
     pthread_mutex_lock(&g_streams_mu);
@@ -183,6 +241,11 @@ void stream_state_apply_stats(int slot, const stats_sample_t *sample) {
     const int leg_count = sample->leg_count;
     const long long now = sample->taken_at_ms;
 
+    leg_event_t events[2 * MAX_GROUP_MEMBERS];
+    int event_count = 0;
+    long long suppressed = 0;
+    char streamid[sizeof g_streams[slot].streamid];
+
     pthread_mutex_lock(&g_streams_mu);
     if (can_read_in) {
         g_streams[slot].input_latency_valid = have_in_latency;
@@ -242,5 +305,20 @@ void stream_state_apply_stats(int slot, const stats_sample_t *sample) {
         g_streams[slot].legs[li] = legs[li];
     }
     g_streams[slot].last_stats_at_ms = now;
+    if (sample->legs_read) {
+        event_count = collect_leg_events(&g_streams[slot], legs, leg_count, now, events);
+    }
+    suppressed = rate_window_take_suppressed(&g_streams[slot].leg_log, now, LEG_LOG_WINDOW_MS);
+    snprintf(streamid, sizeof streamid, "%s", g_streams[slot].streamid);
     pthread_mutex_unlock(&g_streams_mu);
+
+    for (int i = 0; i < event_count; ++i) {
+        relay_logf("Bonded leg %s streamid=%s leg=%s:%d legs=%d\n",
+                   events[i].joined ? "joined" : "left", streamid, events[i].leg.ip,
+                   events[i].leg.port, leg_count);
+    }
+    if (suppressed > 0) {
+        relay_logf("Bonded leg events suppressed streamid=%s count=%lld in the last %d s\n",
+                   streamid, suppressed, LEG_LOG_WINDOW_MS / 1000);
+    }
 }

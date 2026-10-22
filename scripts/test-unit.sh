@@ -15,7 +15,7 @@ WARN=(-Wall -Wextra -Werror)
 
 declare -A SOURCES=(
     [test_relay_config]="src/relay_config.c"
-    [test_backoff_json]="src/backoff.c src/json_out.c"
+    [test_backoff_json]="src/backoff.c src/json_out.c src/ratelimit.c"
 )
 
 status=0

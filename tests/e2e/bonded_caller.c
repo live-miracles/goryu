@@ -13,6 +13,10 @@
  *                 [--host 127.0.0.1] [--passphrase PW] [--latency MS]
  *                 [--drop-leg INDEX --drop-after SECONDS]
  *                 [--add-local IP --add-after SECONDS]
+ *                 [--flap-leg INDEX --flap-interval SECONDS --flap-toggles N]
+ *
+ * --flap-leg closes the leg, then reconnects it, then closes it again, every
+ * --flap-interval seconds, N times in all: a link that keeps going up and down.
  */
 
 #include <arpa/inet.h>
@@ -64,6 +68,9 @@ int main(int argc, char **argv) {
     int drop_leg = -1;
     double drop_after = 0;
     double add_after = 0;
+    int flap_leg = -1;
+    double flap_interval = 1.5;
+    int flap_toggles = 0;
 
     for (int i = 1; i + 1 < argc; i += 2) {
         const char *k = argv[i];
@@ -88,6 +95,12 @@ int main(int argc, char **argv) {
             add_local = v;
         else if (!strcmp(k, "--add-after"))
             add_after = atof(v);
+        else if (!strcmp(k, "--flap-leg"))
+            flap_leg = atoi(v);
+        else if (!strcmp(k, "--flap-interval"))
+            flap_interval = atof(v);
+        else if (!strcmp(k, "--flap-toggles"))
+            flap_toggles = atoi(v);
         else {
             fprintf(stderr, "bonded_caller: unknown option %s\n", k);
             return 2;
@@ -135,6 +148,8 @@ int main(int argc, char **argv) {
 
     double start = now_s();
     int dropped = 0, added = 0;
+    int flap_done = 0, flap_leg_up = 1;
+    double next_flap_at = flap_interval;
     char buf[TS_CHUNK];
     long long sent = 0;
     for (;;) {
@@ -151,6 +166,21 @@ int main(int argc, char **argv) {
             if (srt_connect_group(group, &extra, 1) == SRT_ERROR) die("add leg");
             added = 1;
             fprintf(stderr, "bonded_caller: added leg %s\n", add_local);
+        }
+
+        if (flap_leg >= 0 && flap_leg < legs && flap_done < flap_toggles && t >= next_flap_at) {
+            if (flap_leg_up) {
+                srt_close(cfg[flap_leg].id);
+                flap_leg_up = 0;
+            } else {
+                SRT_SOCKGROUPCONFIG again = srt_prepare_endpoint(
+                    (struct sockaddr *)&src[flap_leg], (struct sockaddr *)&target, sizeof target);
+                if (srt_connect_group(group, &again, 1) == SRT_ERROR) die("flap reconnect");
+                cfg[flap_leg].id = again.id;
+                flap_leg_up = 1;
+            }
+            ++flap_done;
+            next_flap_at = t + flap_interval;
         }
 
         size_t n = fread(buf, 1, sizeof buf, stdin);

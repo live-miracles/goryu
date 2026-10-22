@@ -65,6 +65,7 @@ static void read_input(stats_sample_t *sample, SRTSOCKET in_sock) {
     size_t member_count = MAX_GROUP_MEMBERS;
     memset(members, 0, sizeof members);
     if (srt_group_data(in_sock, members, &member_count) != SRT_ERROR) {
+        sample->legs_read = 1;
         for (size_t i = 0; i < member_count; ++i) {
             if (members[i].id == SRT_INVALID_SOCK) continue;
             if (members[i].memberstate == SRT_GST_BROKEN) continue;

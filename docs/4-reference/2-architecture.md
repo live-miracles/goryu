@@ -27,6 +27,7 @@ small modules listed [below](#modules). It has three kinds of thread.
 | `status_api.c`, `json_out.c` | The loopback HTTP thread and the JSON writers |
 | `relay_config.c` | `goryu.json`, URI and query parsing, passphrase rules, URI redaction |
 | `srt_opts.c` | Applies SRT options from a query and reports a refused one |
+| `ratelimit.c` | A fixed window that lets a few events through and counts the rest (used for the leg join/leave log lines) |
 | `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays |
 
 The tracker and the stream state use the same slot index for a session. Both are
@@ -91,7 +92,12 @@ derives the input latency from the legs; see the
 
 libsrt's log level is set to errors only, and a process-wide handler caps what
 is left at 20 lines per second. See
-[Reliability](../3-operations/1-reliability.md#log-volume) for why. The
+[Reliability](../3-operations/1-reliability.md#log-volume) for why. A bonded leg
+joining or leaving is logged by the stats sampler (see the
+[status API](1-status-api.md)), at most 12 lines per stream per 30 s; a leg that
+flaps faster than that is summarised once the window ends
+(`Bonded leg events suppressed streamid=... count=N in the last 30 s`), so a bad link
+cannot flood the journal the way the libsrt messages once did. The
 passphrase is never logged: the startup line shows the output URI with
 `passphrase=<redacted>`, and a bad config reports the offending key and the
 passphrase's length, not its value.

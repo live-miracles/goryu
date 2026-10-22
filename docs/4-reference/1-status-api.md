@@ -83,7 +83,13 @@ Each `streamStates[]` entry:
     unplugged during testing, libsrt removed the dead leg from the group within
     the one-second sampling interval anyway. A leg that goes down simply
     disappears from the list, so detect it by comparing `legs[]` with the legs
-    you have seen before.
+    you have seen before. Goryu does this itself and logs each change, so the
+    journal tells you which link dropped and when without polling:
+    `Bonded leg joined streamid=... leg=<ip>:<port> legs=2` and
+    `Bonded leg left streamid=... leg=<ip>:<port> legs=1` (`legs` is the number
+    of legs after the change). A leg that reconnects from a new port is a left and a
+    joined. Changes are noticed on the one-second sampling, so a leg that is gone and
+    back within a second is not seen.
   - `rttMs`, `recvPacketsTotal`, `recvUniquePacketsTotal`, `recvLossTotal`,
     `recvDropTotal`, `retransTotal`: stats for that leg only
   - `latencyMs`: the negotiated latency for that individual leg's own socket

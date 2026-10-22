@@ -5,6 +5,7 @@
 #endif
 #include "../../src/backoff.h"
 #include "../../src/json_out.h"
+#include "../../src/ratelimit.h"
 #include "test.h"
 
 #include <stdlib.h>
@@ -128,6 +129,47 @@ static void test_optional_values(void) {
     free(r);
 }
 
+static void test_rate_window_limits_and_counts(void) {
+    rate_window_t w = {0};
+    /* 3 per 1000 ms: the first three pass, the rest are counted */
+    CHECK(rate_window_allow(&w, 1000, 3, 1000) == 1);
+    CHECK(rate_window_allow(&w, 1100, 3, 1000) == 1);
+    CHECK(rate_window_allow(&w, 1200, 3, 1000) == 1);
+    CHECK(rate_window_allow(&w, 1300, 3, 1000) == 0);
+    CHECK(rate_window_allow(&w, 1900, 3, 1000) == 0);
+    CHECK(w.suppressed == 2);
+    /* still inside the window: no summary yet */
+    CHECK(rate_window_take_suppressed(&w, 1999, 1000) == 0);
+    CHECK(w.suppressed == 2);
+    /* the window has ended: the summary is reported once, then cleared */
+    CHECK(rate_window_take_suppressed(&w, 2000, 1000) == 2);
+    CHECK(rate_window_take_suppressed(&w, 2001, 1000) == 0);
+    /* and a new window lets events through again */
+    CHECK(rate_window_allow(&w, 2500, 3, 1000) == 1);
+}
+
+static void test_rate_window_summary_without_a_later_event(void) {
+    rate_window_t w = {0};
+    for (int i = 0; i < 10; ++i)
+        rate_window_allow(&w, 5000 + i, 2, 60000);
+    CHECK(w.suppressed == 8);
+    /* a burst that then goes quiet is still summarised once its window ends */
+    CHECK(rate_window_take_suppressed(&w, 5000 + 59999, 60000) == 0);
+    CHECK(rate_window_take_suppressed(&w, 5000 + 60000, 60000) == 8);
+}
+
+static void test_rate_window_edges(void) {
+    rate_window_t w = {0};
+    CHECK(rate_window_allow(&w, 100, 0, 1000) == 0); /* a limit of 0 blocks everything */
+    CHECK(w.suppressed == 1);
+    rate_window_t z = {0};
+    CHECK(rate_window_allow(&z, 0, 1, 1000) == 1); /* a clock reading of 0 works */
+    CHECK(rate_window_allow(&z, 10, 1, 1000) == 0);
+    rate_window_t c = {0};
+    CHECK(rate_window_allow(&c, 9000, 1, 1000) == 1);
+    CHECK(rate_window_allow(&c, 8000, 1, 1000) == 1); /* the clock stepped back: new window */
+}
+
 int main(void) {
     test_backoff_sequence();
     test_backoff_edges();
@@ -136,5 +178,8 @@ int main(void) {
     test_escaping_long_string();
     test_object_commas_and_types();
     test_optional_values();
+    test_rate_window_limits_and_counts();
+    test_rate_window_summary_without_a_later_event();
+    test_rate_window_edges();
     TEST_SUMMARY("backoff_json");
 }

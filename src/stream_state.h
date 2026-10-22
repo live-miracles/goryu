@@ -5,6 +5,7 @@
 
 #include <srt/srt.h>
 
+#include "ratelimit.h"
 #include "relay_common.h"
 
 /* The relay's shared, mutex-protected telemetry: one relay_stream_state_t per
@@ -35,6 +36,12 @@ typedef struct relay_leg_state {
     int reorder_distance;
     int rcv_buf_ms;
 } relay_leg_state_t;
+
+/* A bonded leg as it is logged: where it connects from. */
+typedef struct relay_leg_ref {
+    char ip[INET6_ADDRSTRLEN];
+    int port;
+} relay_leg_ref_t;
 
 typedef struct relay_stream_state {
     char streamid[1024];
@@ -83,6 +90,11 @@ typedef struct relay_stream_state {
     int output_snd_buf_ms;
     relay_leg_state_t legs[MAX_GROUP_MEMBERS];
     int leg_count;
+    /* The legs last reported as joined or left in the log, so each change is
+     * logged once, and the limiter that keeps a flapping leg from flooding it. */
+    relay_leg_ref_t logged_legs[MAX_GROUP_MEMBERS];
+    int logged_leg_count;
+    rate_window_t leg_log;
     /* Set once when the session starts. A plain (non-group) input has no legs[]
      * to carry the encoder's address, so it is reported here instead; for a
      * bonded group the per-leg addresses in legs[] are authoritative. */
@@ -109,6 +121,9 @@ typedef struct stats_sample {
     SRT_TRACEBSTATS out_stats;
     relay_leg_state_t legs[MAX_GROUP_MEMBERS];
     int leg_count;
+    /* srt_group_data succeeded, so legs[] is the real set (possibly empty) and
+     * not just "nothing could be read". */
+    int legs_read;
 } stats_sample_t;
 
 /* The most recent process-level error, shown as lastError in the status API. */
