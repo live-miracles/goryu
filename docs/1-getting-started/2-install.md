@@ -72,6 +72,41 @@ startup, so restart the service after changing `goryu.json`.
 Open the encoder-facing port (`input_port`) for **UDP**. The status port is
 bound to `127.0.0.1` and must stay closed to the network.
 
+## Docker
+
+`docker/` holds a runtime image and a compose example. The image installs a published
+release and checks it against `checksums.sha256`, runs as an unprivileged user, and
+stops cleanly on `docker stop`. It is linux/amd64 only, like the release, and there is
+no published image yet: build it.
+
+```bash
+docker build -t goryu docker                                             # newest release
+docker build --build-arg GORYU_VERSION=v3.3.0 -t goryu:v3.3.0 docker     # a pinned one
+docker run -d --name goryu --network host --restart unless-stopped \
+  -v "$PWD/goryu.json:/etc/goryu/goryu.json:ro" goryu
+curl http://127.0.0.1:8081/status
+```
+
+Use host networking: the status API listens on `127.0.0.1` inside the container, so a
+published port cannot reach it. The config must be readable by uid 10001 (`chmod 644`),
+and is read only at startup, so `docker restart goryu` after changing it. The log is
+the container's stdout (`docker logs goryu`). Open the input port for UDP as in
+[Firewall](#firewall).
+
+To see the whole path with no hardware, the compose file runs MediaMTX and Goryu, and
+its `demo` profile adds a bonded test sender (a test pattern over two legs on
+`127.0.0.1` and `127.0.0.2`):
+
+```bash
+docker compose -f docker/compose.yaml up -d --build
+docker compose -f docker/compose.yaml --profile demo up -d --build sender
+curl -s http://127.0.0.1:8081/status | jq '.streamStates[0] | {streamId, bonded: .input.bonded, legs: (.input.legs | length)}'
+ffplay 'srt://127.0.0.1:8890?streamid=read:demo'
+```
+
+The first sender build compiles libsrt, which takes a few minutes. Stop everything with
+`docker compose -f docker/compose.yaml --profile demo down`.
+
 ## Bunryu
 
 If you use Bunryu you do not install Goryu by hand: Bunryu's installer

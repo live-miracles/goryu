@@ -95,8 +95,11 @@ Navigation only; correct an entry when a change makes it stale.
 - `scripts/` - `build-local.sh` (Docker build into `objs/`), `build-release.sh`
   (archive + checksums into `build/`), `goryu.Dockerfile` (pinned base image and
   libsrt commit), `run.sh`, `smoke-test.sh`, `test-unit.sh`, `test-e2e.sh`,
-  `format.sh`. `tests/unit/` holds the unit tests and `tests/e2e/` the bonded test caller.
-- `.github/workflows/` - `ci.yml` (format, unit, smoke and end-to-end tests), `release.yml`
+  `test-docker.sh`, `format.sh`. `tests/unit/` holds the unit tests and `tests/e2e/` the bonded test caller.
+- `docker/` - `Dockerfile` (runtime image that installs a published release; not the
+  build image above), `compose.yaml` (MediaMTX + Goryu, and a bonded test sender under
+  the `demo` profile), `goryu.json` (its example config), `demo-sender/`.
+- `.github/workflows/` - `ci.yml` (format, unit, smoke, end-to-end and Docker image tests), `release.yml`
   (tag must equal `VERSION`; builds, attests, publishes).
 - `docs/` - numbered section folders of numbered pages, indexed by
   `docs/README.md`; `README.md` is the short pitch and quick start.

@@ -1,0 +1,48 @@
+# Goryu in front of MediaMTX, with an optional bonded test sender.
+#
+#   docker compose -f docker/compose.yaml up -d --build
+#   curl http://127.0.0.1:8081/status
+#   docker compose -f docker/compose.yaml --profile demo up --build sender
+#
+# Host networking: the status API listens on 127.0.0.1 only (by design), so a published
+# port could not reach it from the host. Linux only, like Goryu.
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.2
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      # Only SRT is used here; the rest would bind ports on the host for nothing.
+      MTX_RTSP: "no"
+      MTX_RTMP: "no"
+      MTX_HLS: "no"
+      MTX_WEBRTC: "no"
+      MTX_MOQ: "no"
+
+  goryu:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [mediamtx]
+    volumes:
+      - ./goryu.json:/etc/goryu/goryu.json:ro
+    # Goryu's own log is capped (see docs/3-operations/1-reliability.md#log-volume);
+    # this caps what Docker keeps of it.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  # A test sender, not part of a deployment: a bonded group (legs on 127.0.0.1 and
+  # 127.0.0.2) carrying a test pattern, so you can see Goryu merge it with no hardware.
+  sender:
+    profiles: [demo]
+    build:
+      context: ..
+      dockerfile: docker/demo-sender/Dockerfile
+    network_mode: host
+    depends_on: [goryu]
+    environment:
+      PORT: "10081"
+      STREAMID: "publish:demo"

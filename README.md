@@ -40,6 +40,8 @@ These runs used legs simulated on loopback. A real AJA BRIDGE LIVE encoder sendi
 
 ## Quick start
 
+No second uplink handy? `docker compose -f docker/compose.yaml --profile demo up --build` runs MediaMTX, Goryu and a bonded test sender, so you can watch the legs merge with no hardware ([details](docs/1-getting-started/2-install.md#docker)).
+
 ```bash
 curl -fsSL -o goryu.tar.gz https://github.com/live-miracles/goryu/releases/latest/download/goryu-linux-x86_64.tar.gz
 mkdir goryu && tar -xzf goryu.tar.gz -C goryu && cd goryu
@@ -58,7 +60,7 @@ Create `goryu.json`, pointing `output_port` at your server's SRT port (for examp
 }
 ```
 
-Run it, then check it is up:
+Run it, then check it is up (or use [Docker](docs/1-getting-started/2-install.md#docker)):
 
 ```bash
 LD_LIBRARY_PATH=lib ./bin/goryu goryu.json

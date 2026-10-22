@@ -1,0 +1,5 @@
+# The demo sender builds from the repository root; send only what it uses.
+*
+!scripts/goryu.Dockerfile
+!tests/e2e/bonded_caller.c
+!docker/demo-sender/run.sh

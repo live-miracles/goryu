@@ -19,6 +19,7 @@ bash scripts/format.sh check # check only, as CI does
 bash scripts/test-unit.sh    # unit tests (gcc with sanitizers; no Docker)
 bash scripts/smoke-test.sh   # build, start with goryu.json, check /status
 bash scripts/test-e2e.sh     # end-to-end scenarios against ./objs/goryu
+bash scripts/test-docker.sh  # the image and compose file in docker/ (DEMO=1 adds a bonded stream)
 ```
 
 `run.sh` honours `GORYU_PATH`, `GORYU_LIB_DIR` and `GORYU_CONFIG_PATH`. The smoke
@@ -57,6 +58,13 @@ a `streamStates` field and the pid of the process it started.
   `E2E_SKIP_BONDED=1` skips these scenarios. What it cannot do is real network
   conditions: loss, jitter, latency or a physical link failing, so the per-leg loss
   and retransmission counters are only checked for presence, not for values.
+- **Docker packaging** (`scripts/test-docker.sh`) builds `docker/Dockerfile`, which
+  installs a published release, and checks the version, that it does not run as root,
+  that a missing config is refused, that the status API answers, that `docker stop`
+  ends it with exit 0 in under 5 s (it is PID 1, so this proves SIGTERM is handled), and
+  that `compose.yaml` is valid. It tests the packaging of a release, not the commit's
+  source. `DEMO=1` also runs the compose stack with the bonded test sender and reads
+  the stream back from MediaMTX; it builds libsrt once, so it is not in CI.
 - The takeover scenario holds a publisher's SRT connection open without sending
   media (ffmpeg remuxing a FIFO). A `SIGSTOP`ped ffmpeg does not work: libsrt's own
   5 s idle timeout drops its connection before the relay's staleness check can run.
@@ -70,6 +78,7 @@ requests:
 - **Unit tests:** `scripts/test-unit.sh`.
 - **Build, smoke and end-to-end tests:** the Docker build, `scripts/smoke-test.sh`,
   then `scripts/test-e2e.sh`.
+- **Docker image:** `scripts/test-docker.sh`.
 
 ## Versioning
 
@@ -113,6 +122,11 @@ changing what ships. To update either one:
   then set `SRT_TAG` and `SRT_COMMIT` in the Dockerfile and `SRT_TAG` in
   `scripts/build-local.sh`. To try another version locally without editing
   files, set both `SRT_TAG` and `SRT_COMMIT` in the environment.
+
+`docker/Dockerfile` repeats the base image digest (it must match the one the release
+is built on, because the archive links against that glibc), so change both together.
+`docker/demo-sender/Dockerfile` reads the libsrt tag and commit out of
+`scripts/goryu.Dockerfile`, so it follows without an edit.
 
 Projects that pin a Goryu release (such as Bunryu's installer and Docker image)
 download `goryu-linux-x86_64.tar.gz` from the release, so the asset name is part
