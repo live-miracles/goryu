@@ -98,7 +98,9 @@ into the binary at build time, so `goryu --version` prints it. Changing
 ## Releases
 
 A release is created by pushing a tag equal to `VERSION`. To cut one, update
-`VERSION`, commit, then:
+`VERSION`, write `.github/release-notes/<tag>.md` (see the newest one for the shape:
+what changed for users, an Upgrading section, install lines and the compare link),
+commit, then:
 
 ```bash
 git tag v3.2.1
@@ -107,8 +109,9 @@ git push origin master v3.2.1
 
 The release workflow (`.github/workflows/release.yml`) runs the CI jobs first,
 then fails if the tag and `VERSION` differ, builds the archive with Docker,
-attests its build provenance, and creates the GitHub Release with generated
-notes. The release carries the archive and `checksums.sha256`.
+attests its build provenance, and creates the GitHub Release with the notes file
+(generated commit titles with a warning if the file is missing). The release
+carries the archive and `checksums.sha256`.
 
 A published release is never overwritten: if the release already exists the
 workflow fails. Fix forward with a new version.

@@ -49,12 +49,21 @@ jobs:
         run: |
           # Fails if the release already exists: a published release is never
           # overwritten. Fix forward with a new version instead.
+          # Notes are written by hand in .github/release-notes/<tag>.md before the tag
+          # is pushed; a missing file falls back to the generated list of commits.
+          notes_file=".github/release-notes/$GITHUB_REF_NAME.md"
+          if [[ -f "$notes_file" ]]; then
+            notes_args=(--notes-file "$notes_file")
+          else
+            echo "::warning::$notes_file is missing; publishing generated notes"
+            notes_args=(--generate-notes)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             build/goryu-linux-x86_64.tar.gz \
             build/checksums.sha256 \
             --verify-tag \
             --title "goryu $GITHUB_REF_NAME" \
-            --generate-notes
+            "${notes_args[@]}"
 
   image:
     name: Build and publish Docker image

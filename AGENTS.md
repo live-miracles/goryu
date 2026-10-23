@@ -102,6 +102,7 @@ Navigation only; correct an entry when a change makes it stale.
   Hub description), `demo-sender/`.
 - `.github/workflows/` - `ci.yml` (format, unit, smoke, end-to-end and Docker image tests), `release.yml`
   (tag must equal `VERSION`; builds, attests, publishes the release, then the Docker image).
+  `.github/release-notes/<tag>.md` holds each release's hand-written notes.
 - `docs/` - numbered section folders of numbered pages, indexed by
   `docs/README.md`; `README.md` is the short pitch and quick start.
 
@@ -151,6 +152,26 @@ measurement behind it (the log cap above is the model). A parameter with no
 recorded reason gets questioned later. No changelog narration or text that
 restates the code. Every new page must be linked from `docs/README.md`, and
 relative links must resolve.
+
+## Release notes
+
+Every release gets `.github/release-notes/<tag>.md`, committed before the tag is
+pushed; `release.yml` publishes it as the release body (a missing file falls back to
+generated commit titles, which is not good enough). Write it for someone who runs
+Goryu, not for a reviewer:
+
+- One opening sentence on what changes for them, then bullets of user-visible changes:
+  what it does and how to use it, not commit subjects or file names. Read the commits
+  since the last tag, but describe behaviour.
+- An **Upgrading** section that says whether the config, the status API or the log
+  format changed, and that a restart drops active streams.
+- An **Install** section (archive and checksum, the Docker one-liner) and the compare
+  link at the end.
+- Say only what the diff and the tests back up. No performance or compatibility claim
+  that was not measured, and the same redaction rules as the docs (no streamids,
+  passphrases or customer addresses).
+
+Look at the newest file in that folder for the shape.
 
 ## Testing
 

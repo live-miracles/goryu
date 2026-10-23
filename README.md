@@ -5,18 +5,16 @@
 _Goryu (合流, "confluence"): many network paths, one stream._
 
 [![CI](https://github.com/live-miracles/goryu/actions/workflows/ci.yml/badge.svg)](https://github.com/live-miracles/goryu/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/live-miracles/goryu)](https://github.com/live-miracles/goryu/releases/latest)
+[![Docker image](https://img.shields.io/badge/docker-nandisha0%2Fgoryu-2496ed?logo=docker&logoColor=white)](https://hub.docker.com/r/nandisha0/goryu)
+[![libsrt 1.5.6](https://img.shields.io/badge/libsrt-1.5.6-informational)](https://github.com/Haivision/srt)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Bonded SRT for servers that don't speak it.** SRT bonding sends one stream over several network links (two uplinks, two SIMs) so a failing link doesn't drop the stream. SRS, MediaMTX and Restreamer's engine (datarhei Core) reject a bonded SRT group. Goryu sits in front of them: it accepts the group, merges the legs into one deduplicated stream, and forwards ordinary SRT to your server under the same `streamid`. A plain single-link SRT caller works on the same port.
 
-```text
- encoder ── link A ──┐
- (one SRT group,     ├──▶  Goryu :10081  ── plain SRT ──▶  SRS · MediaMTX · Restreamer
-  one streamid)      │     merges the legs,                or any SRT server
-         ── link B ──┘     drops duplicates
-```
+<p align="center"><img src=".github/assets/how-it-works.svg" alt="Without Goryu a bonded SRT group over two links is rejected by SRS, MediaMTX and Restreamer. With Goryu in between, the legs are merged and one plain SRT stream is accepted." width="900" /></p>
 
-One C binary on [libsrt](https://github.com/Haivision/srt) 1.5.6, a short JSON config, and a loopback JSON status API with per-leg telemetry. It is also the bonded-SRT ingress of [Bunryu](https://github.com/live-miracles/bunryu).
+One C binary on [libsrt](https://github.com/Haivision/srt) 1.5.6, a short JSON config, and a loopback JSON status API with per-leg telemetry. It is also the bonded-SRT ingress of [Bunryu](https://github.com/live-miracles/bunryu). Walkthrough: [SRS, MediaMTX and Restreamer reject bonded SRT. Here is a relay that fixes it](https://live-miracles.github.io/blog/srs-mediamtx-restreamer-reject-bonded-srt/).
 
 ## Works in front of
 
