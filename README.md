@@ -40,6 +40,10 @@ These runs used legs simulated on loopback. A real AJA BRIDGE LIVE encoder sendi
 
 No second uplink handy? `docker compose -f docker/compose.yaml --profile demo up --build` runs MediaMTX, Goryu and a bonded test sender, so you can watch the legs merge with no hardware ([details](docs/1-getting-started/2-install.md#docker)).
 
+<p align="center"><img src=".github/assets/demo.gif" alt="Recording of the Docker demo: Goryu logs two bonded legs joining and the status API shows both running; one leg then closes, the log says so, and the stream keeps flowing at about 2 Mbit/s." width="880" /></p>
+
+<sub>The demo's own output, replayed at twice the speed. The test sender closes its second leg after 25 s (`SENDER_ARGS="--drop-leg 1 --drop-after 25"`); the log line and the status come straight from Goryu v3.4.0.</sub>
+
 ```bash
 curl -fsSL -o goryu.tar.gz https://github.com/live-miracles/goryu/releases/latest/download/goryu-linux-x86_64.tar.gz
 mkdir goryu && tar -xzf goryu.tar.gz -C goryu && cd goryu
