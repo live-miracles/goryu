@@ -4,6 +4,13 @@ Goryu does one thing: terminate an SRT bonding group (libsrt socket groups) and
 forward ordinary SRT. Whether it is the right tool depends on what your encoder
 sends and what your server accepts.
 
+| Your encoder sends | Your server | Use |
+|---|---|---|
+| A libsrt socket group (broadcast or main/backup) | Accepts bonded SRT itself (Nimble Streamer) | No relay needed |
+| A libsrt socket group | SRS, MediaMTX, datarhei Core or any plain SRT server | Goryu |
+| SRTLA | Any plain SRT server | `srtla_rec`, not Goryu |
+| A vendor bonding protocol | The vendor's receiver | Not Goryu |
+
 ## If your server can accept bonded SRT itself
 
 Then you do not need a relay. [Nimble Streamer](https://softvelum.com/2024/07/deliver-receive-srt-bonded-streams/)
@@ -12,6 +19,34 @@ an open proposal to accept bonded publishers
 ([ossrs/srs#4771](https://github.com/ossrs/srs/issues/4771)); until it ships,
 SRS rejects a group. MediaMTX and datarhei Core were tested with a bonded group
 and rejected it too (see [Downstream servers](../2-usage/3-downstream-servers.md)).
+
+## srt-live-transmit
+
+`srt-live-transmit` is libsrt's own sample app and the first thing most people try
+as a relay: an SRT listener in, an SRT caller out. It accepts a group when the
+listener sets `groupconnect=1`, but it did not work as a relay for us, which is why
+Goryu was written.
+
+```bash
+srt-live-transmit "srt://:9000?mode=listener&groupconnect=1" "srt://127.0.0.1:9001?mode=caller"
+```
+
+Test setup: libsrt built with `--enable-bonding --enable-apps`, a broadcast group
+from `tests/e2e/bonded_caller.c` (legs on 127.0.0.1 and 127.0.0.2), about 9 s of
+800 kb/s MPEG-TS, and a second `srt-live-transmit` as the downstream.
+
+| Input | Result |
+|---|---|
+| Plain SRT, with or without `groupconnect=1` | Works: about 987 KB reaches the downstream |
+| Bonded group, one leg or two, libsrt 1.5.6, 1.5.7 and master (`9f23902`) | 10,528 bytes arrive, then the process aborts (exit 134) with `corrupted size vs. prev_size` |
+| The same group through Goryu | Both legs accepted, about 1.25 MB reaches the downstream |
+
+The result was the same on every run and on all three libsrt versions. With two
+legs the log also shows the second leg refused with `Listener's backlog exceeded`
+(the app's listener has a backlog of 1), but a single leg aborts the same way, so
+that is not the whole cause; we did not find the rest. This is a loopback test with
+one sender, not a survey of every build or option, so another configuration may
+behave differently. It is also one input and one output per process.
 
 ## SRTLA
 
@@ -37,13 +72,15 @@ protocol into StreamHub. Those senders do not work with Goryu. SRT Mini Server's
 any encoder on Windows; its page does not say how, so it has not been tried with
 Goryu.
 
-## Other tools
+## Build your own
 
-- **libsrt's own apps.** `srt-live-transmit` takes one input and one output and
-  does not document group support. `srt-test-live` is libsrt's bonding test
-  application, not something to run as a relay.
-- **Your own libsrt program.** Goryu is about 2,800 lines of C; if you need other
+- **A libsrt program.** Goryu is about 2,800 lines of C; if you need other
   behaviour, the [architecture](../4-reference/2-architecture.md) is short enough
   to fork.
+- **A Go library.** [zsiec/srtgo](https://pkg.go.dev/github.com/zsiec/srtgo) is a
+  pure-Go SRT implementation with bonding modes and a listener option for groups. It
+  is a library, not a relay, and it has not been tried with Goryu.
 - **Plain SRT relays** such as [voc/srtrelay](https://github.com/voc/srtrelay)
   fan one SRT stream out to many viewers; its README does not mention bonding.
+- **`srt-test-live`** is libsrt's bonding test application. As a sender in our test
+  it failed to create a group (see [Sending bonded SRT](../2-usage/2-sending-bonded-srt.md)).

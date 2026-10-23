@@ -4,7 +4,7 @@
 
 - [Introduction](1-getting-started/1-introduction.md): what it is, how bonded and plain SRT are handled, limits
 - [Install](1-getting-started/2-install.md): release download, systemd, Docker, firewall port
-- [Alternatives](1-getting-started/3-alternatives.md): native server bonding, SRTLA, vendor bonding, and when Goryu is the right tool
+- [Alternatives](1-getting-started/3-alternatives.md): native server bonding, srt-live-transmit (tested as a relay), SRTLA, vendor bonding, and when Goryu is the right tool
 
 ## Usage
 
