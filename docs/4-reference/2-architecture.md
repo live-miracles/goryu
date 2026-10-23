@@ -1,6 +1,6 @@
 # Architecture
 
-Goryu is one process of about 2,600 lines of C on top of libsrt, split into the
+Goryu is one process of about 2,800 lines of C on top of libsrt, split into the
 small modules listed [below](#modules). It has three kinds of thread.
 
 ## Threads

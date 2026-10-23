@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Goryu is a small SRT bonding relay for Linux: one C binary (about 2,600 lines on
+Goryu is a small SRT bonding relay for Linux: one C binary (about 2,800 lines on
 top of libsrt 1.5.6) with a JSON config of six fields (plus an optional destination passphrase) and a loopback JSON status
 API. It accepts a bonded SRT socket group, or an ordinary single-link SRT
 caller, on one listener, merges the legs into one deduplicated MPEG-TS stream and

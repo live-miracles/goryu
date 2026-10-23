@@ -42,7 +42,7 @@ Goryu.
 - **libsrt's own apps.** `srt-live-transmit` takes one input and one output and
   does not document group support. `srt-test-live` is libsrt's bonding test
   application, not something to run as a relay.
-- **Your own libsrt program.** Goryu is about 2,600 lines of C; if you need other
+- **Your own libsrt program.** Goryu is about 2,800 lines of C; if you need other
   behaviour, the [architecture](../4-reference/2-architecture.md) is short enough
   to fork.
 - **Plain SRT relays** such as [voc/srtrelay](https://github.com/voc/srtrelay)
