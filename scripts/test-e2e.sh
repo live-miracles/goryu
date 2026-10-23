@@ -599,7 +599,8 @@ scenario_bonded_backup() {
         "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.2 .state)\" = idle ]"
     check "the idle backup carries no data" bash -c \
         "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.2 '.recvRateMbps < 0.2')\" = true ]"
-    check "the main leg carries the whole stream" bash -c \
+    # A one-second rate sample can dip on a starved runner, so give it a few tries.
+    check "the main leg carries the whole stream" wait_for 10 bash -c \
         "$(declare -f stream_jq status leg_field); STATUS=$STATUS; [ \"\$(leg_field 127.0.0.1 '.recvRateMbps > 2')\" = true ]"
     check "bytes keep growing" forwarding demo/bk
     check "the loss of the main leg is logged" wait_for 30 log_has "Bonded leg left streamid=demo/bk leg=127.0.0.1:[0-9]* legs=1" "$WORK/g.log"
@@ -676,7 +677,15 @@ for name in "${SELECTED[@]}"; do
     fi
     echo "== $name"
     : >"$WORK/sink.log"; : >"$WORK/pub.log"
+    failed_before=$FAIL
     "scenario_$name"
+    if ((FAIL > failed_before)); then
+        # A check that failed in CI leaves nothing else behind: the work dir is removed on exit.
+        echo "  --- relay log, last 40 lines"
+        tail -n 40 "$WORK/g.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
+        echo "  --- status"
+        status 2>/dev/null | jq -c . 2>/dev/null | cut -c1-2000 | sed 's/^/  | /'
+    fi
     kill_pids 2>/dev/null
 done
 

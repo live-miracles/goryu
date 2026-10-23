@@ -38,7 +38,8 @@ a `streamStates` field and the pid of the process it started.
   ffmpeg publishers on spare ports (`E2E_BASE_PORT`, default 24000) and a private
   work dir, so a running relay is not touched. They need `ffmpeg` with SRT, `curl`,
   `jq` and `ss` (plus Docker for the bonded caller), and take about three minutes.
-  Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
+  A scenario with a failed check prints the relay's last 40 log lines and the status
+  API response, because the work dir is gone once CI ends. Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
   duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
   bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
   bonded_abrupt_end`.
