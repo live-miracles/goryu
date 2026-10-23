@@ -89,9 +89,12 @@ curl http://127.0.0.1:8081/status
 To build it yourself instead (the image installs a published release):
 
 ```bash
-docker build -t goryu docker                                             # newest release
+docker build --no-cache -t goryu docker                                  # newest release
 docker build --build-arg GORYU_VERSION=v3.4.0 -t goryu:v3.4.0 docker     # a pinned one
 ```
+
+`--no-cache` matters for `latest`: Docker cannot see that the newest release changed, so
+a cached build keeps the release it first downloaded.
 
 Use host networking: the status API listens on `127.0.0.1` inside the container, so a
 published port cannot reach it. The config must be readable by uid 10001 (`chmod 644`),
@@ -104,11 +107,15 @@ its `demo` profile adds a bonded test sender (a test pattern over two legs on
 `127.0.0.1` and `127.0.0.2`):
 
 ```bash
-docker compose -f docker/compose.yaml up -d --build
+docker compose -f docker/compose.yaml up -d
 docker compose -f docker/compose.yaml --profile demo up -d --build sender
 curl -s http://127.0.0.1:8081/status | jq '.streamStates[0] | {streamId, bonded: .input.bonded, legs: (.input.legs | length)}'
 ffplay 'srt://127.0.0.1:8890?streamid=read:demo'
 ```
+
+To watch the stream survive a failing link, start the sender with
+`SENDER_ARGS="--drop-leg 1 --drop-after 20"`: the second leg closes after 20 s,
+`legs` goes from 2 to 1 and `forwardedBytes` keeps growing.
 
 The first sender build compiles libsrt, which takes a few minutes. Stop everything with
 `docker compose -f docker/compose.yaml --profile demo down`.

@@ -1,6 +1,6 @@
 # Goryu in front of MediaMTX, with an optional bonded test sender.
 #
-#   docker compose -f docker/compose.yaml up -d --build
+#   docker compose -f docker/compose.yaml up -d
 #   curl http://127.0.0.1:8081/status
 #   docker compose -f docker/compose.yaml --profile demo up --build sender
 #
@@ -20,7 +20,12 @@ services:
       MTX_MOQ: "no"
 
   goryu:
-    build: .
+    # The published image, pulled on every `up` so it follows `latest`. A local build
+    # would reuse a cached layer from an older release (the Dockerfile fetches `latest`,
+    # which Docker cannot see change); build it yourself with `docker build`, see
+    # docs/1-getting-started/2-install.md#docker.
+    image: ghcr.io/live-miracles/goryu:latest
+    pull_policy: always
     network_mode: host
     restart: unless-stopped
     depends_on: [mediamtx]
@@ -46,3 +51,6 @@ services:
     environment:
       PORT: "10081"
       STREAMID: "publish:demo"
+      # SENDER_ARGS="--drop-leg 1 --drop-after 20" docker compose ... up  loses a leg
+      # after 20 s, to watch the stream carry on (see tests/e2e/bonded_caller.c).
+      EXTRA: "${SENDER_ARGS:-}"

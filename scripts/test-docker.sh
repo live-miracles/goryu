@@ -62,7 +62,7 @@ EOF
 chmod 644 "$WORK_DIR/goryu.json"
 
 echo "== build the image"
-docker build -q --build-arg "GORYU_VERSION=${GORYU_VERSION:-latest}" -t "$IMAGE" "$REPO_DIR/docker" >/dev/null
+docker build -q --no-cache --build-arg "GORYU_VERSION=${GORYU_VERSION:-latest}" -t "$IMAGE" "$REPO_DIR/docker" >/dev/null
 
 version="$(docker run --rm "$IMAGE" --version)"
 echo "release in image: $version"

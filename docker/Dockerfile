@@ -3,7 +3,7 @@
 # the one the release is built on (scripts/goryu.Dockerfile), because the archive
 # links against its glibc. linux/amd64 only, like the release.
 #
-#   docker build -t goryu docker
+#   docker build --no-cache -t goryu docker
 #   docker build --build-arg GORYU_VERSION=v3.3.0 -t goryu:v3.3.0 docker
 #
 # GORYU_VERSION is "latest" or a tag (vX.Y.Z). Pin a tag for anything long-lived.

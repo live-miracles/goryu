@@ -63,8 +63,9 @@ a `streamStates` field and the pid of the process it started.
   that a missing config is refused, that the status API answers, that `docker stop`
   ends it with exit 0 in under 5 s (it is PID 1, so this proves SIGTERM is handled), and
   that `compose.yaml` is valid. It tests the packaging of a release, not the commit's
-  source. `DEMO=1` also runs the compose stack with the bonded test sender and reads
-  the stream back from MediaMTX; it builds libsrt once, so it is not in CI.
+  source. `DEMO=1` also runs the compose stack (which pulls the published `latest` image) with the
+  bonded test sender and reads the stream back from MediaMTX; the sender build compiles
+  libsrt once, so it is not in CI.
 - The takeover scenario holds a publisher's SRT connection open without sending
   media (ffmpeg remuxing a FIFO). A `SIGSTOP`ped ffmpeg does not work: libsrt's own
   5 s idle timeout drops its connection before the relay's staleness check can run.
