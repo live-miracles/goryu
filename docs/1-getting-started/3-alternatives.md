@@ -41,12 +41,21 @@ from `tests/e2e/bonded_caller.c` (legs on 127.0.0.1 and 127.0.0.2), about 9 s of
 | Bonded group, one leg or two, libsrt 1.5.6, 1.5.7 and master (`9f23902`) | 10,528 bytes arrive, then the process aborts (exit 134) with `corrupted size vs. prev_size` |
 | The same group through Goryu | Both legs accepted, about 1.25 MB reaches the downstream |
 
-The result was the same on every run and on all three libsrt versions. With two
-legs the log also shows the second leg refused with `Listener's backlog exceeded`
-(the app's listener has a backlog of 1), but a single leg aborts the same way, so
-that is not the whole cause; we did not find the rest. This is a loopback test with
-one sender, not a survey of every build or option, so another configuration may
-behave differently. It is also one input and one output per process.
+The result was the same on every run and on all three libsrt versions. The cause is in
+the app, not in libsrt's bonding: `SrtSource::Read` (`apps/transmitmedia.cpp`) passes an
+uninitialized `SRT_MSGCTRL` to `srt_recvmsg2`, and for a group libsrt writes the group's
+member data through the garbage `grpdata` pointer. Valgrind reports the invalid write;
+plain sockets never touch that field, which is why they work. Initializing the struct
+(`SRT_MSGCTRL ctrl = srt_msgctrl_default;`) was enough for the same test to deliver about
+1.2 MB with no abort. It is reported upstream as
+[Haivision/srt#3418](https://github.com/Haivision/srt/issues/3418); until a release has
+the fix, `srt-live-transmit` from a stock build is not usable here.
+
+A patched build is not a drop-in replacement for Goryu. With two legs, the log shows the
+second leg refused with `Listener's backlog exceeded` (the app listens with a backlog of
+1), and we did not check how many legs the patched relay ends up with. It is also one
+input and one output per process. This is a loopback test with one sender, not a survey
+of every build or option.
 
 ## SRTLA
 
