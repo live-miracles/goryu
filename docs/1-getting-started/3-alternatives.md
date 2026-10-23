@@ -47,15 +47,15 @@ uninitialized `SRT_MSGCTRL` to `srt_recvmsg2`, and for a group libsrt writes the
 member data through the garbage `grpdata` pointer. Valgrind reports the invalid write;
 plain sockets never touch that field, which is why they work. Initializing the struct
 (`SRT_MSGCTRL ctrl = srt_msgctrl_default;`) was enough for the same test to deliver about
-1.2 MB with no abort. It is reported upstream as
-[Haivision/srt#3418](https://github.com/Haivision/srt/issues/3418); until a release has
-the fix, `srt-live-transmit` from a stock build is not usable here.
+1.2 MB with no abort.
 
-A patched build is not a drop-in replacement for Goryu. With two legs, the log shows the
-second leg refused with `Listener's backlog exceeded` (the app listens with a backlog of
-1), and we did not check how many legs the patched relay ends up with. It is also one
-input and one output per process. This is a loopback test with one sender, not a survey
-of every build or option.
+That does not make it a bonded relay. On the upstream report
+([Haivision/srt#3418](https://github.com/Haivision/srt/issues/3418)) a libsrt maintainer
+answered that `srt-live-transmit` does not support socket groups and that setting
+`groupconnect` should be disallowed in the app. Even patched, the test showed the second
+leg refused with `Listener's backlog exceeded` (the app listens with a backlog of 1), and
+it is one input and one output per process. This is a loopback test with one sender, not
+a survey of every build or option.
 
 ## SRTLA
 
