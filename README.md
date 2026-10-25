@@ -26,7 +26,13 @@ A bonded group was sent to each server directly and through Goryu, then the stre
 | MediaMTX v1.21.2 | rejected | accepted, stream read back |
 | datarhei Core 16.16.0 (Restreamer's engine) | rejected | accepted, stream read back |
 
-These runs used legs simulated on loopback. A real AJA BRIDGE LIVE encoder sending two legs across the internet (about 41 to 44 ms RTT, 22.6 Mbps per leg, packet loss on both legs) was also accepted and forwarded to SRS by a deployed relay; that is the setup we run our live events on every day. Unplugging one of its two cables for 45 seconds left the stream flowing at the same rate, and the leg rejoined by itself. A link that degrades under heavy loss, rather than disconnecting, has not been tested. You still need a sender that implements SRT bonding: see [Sending bonded SRT](docs/2-usage/2-sending-bonded-srt.md) for what can send one and a test caller you can run today. For SRTLA or a server with built-in bonding, see [Alternatives](docs/1-getting-started/3-alternatives.md).
+Those runs used legs simulated on loopback. On real links:
+
+- A real AJA BRIDGE LIVE encoder sending two legs across the internet (about 41 to 44 ms RTT, 22.6 Mbps per leg, packet loss on both legs) was accepted and forwarded to SRS by a deployed relay. That is the setup we run our live events on every day.
+- Unplugging one of its two cables for 45 seconds left the stream flowing at the same rate, and the leg rejoined by itself.
+- Not tested: a link that degrades under heavy loss rather than disconnecting.
+
+You still need a sender that implements SRT bonding: see [Sending bonded SRT](docs/2-usage/2-sending-bonded-srt.md) for what can send one and a test caller you can run today. For SRTLA or a server with built-in bonding, see [Alternatives](docs/1-getting-started/3-alternatives.md).
 
 ## Features
 
