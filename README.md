@@ -101,6 +101,10 @@ If a leg fails, it leaves `legs[]` and `forwardedBytes` keeps growing; the downs
 - **Operations:** [Reliability](docs/3-operations/1-reliability.md)
 - **Reference:** [Status API](docs/4-reference/1-status-api.md) · [Architecture](docs/4-reference/2-architecture.md) · [Development](docs/4-reference/3-development.md)
 
+## Help
+
+Ask questions and share ideas in [Discussions](https://github.com/live-miracles/goryu/discussions). Report bugs as [issues](https://github.com/live-miracles/goryu/issues/new/choose).
+
 ## License
 
 [MIT](LICENSE). libsrt and OpenSSL are separate projects under their own licenses.
