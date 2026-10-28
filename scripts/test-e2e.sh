@@ -676,13 +676,17 @@ for name in "${SELECTED[@]}"; do
         fi
     fi
     echo "== $name"
-    : >"$WORK/sink.log"; : >"$WORK/pub.log"
+    : >"$WORK/sink.log"; : >"$WORK/pub.log"; : >"$WORK/bonded.log"
     failed_before=$FAIL
     "scenario_$name"
     if ((FAIL > failed_before)); then
         # A check that failed in CI leaves nothing else behind: the work dir is removed on exit.
         echo "  --- relay log, last 40 lines"
         tail -n 40 "$WORK/g.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
+        echo "  --- publisher log, last 20 lines"
+        tail -n 20 "$WORK/pub.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
+        echo "  --- bonded caller log, last 20 lines"
+        tail -n 20 "$WORK/bonded.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
         echo "  --- status"
         status 2>/dev/null | jq -c . 2>/dev/null | cut -c1-2000 | sed 's/^/  | /'
     fi
