@@ -118,6 +118,21 @@ int tracker_is_current(int slot, SRTSOCKET input_sock, SRTSOCKET output_sock) {
     return current;
 }
 
+/* Stops tracking the slot's sockets and appends them to sockets[] for the caller
+ * to close once it has released the lock. Clearing them here, under the lock, is
+ * what makes exactly one thread call srt_close on each socket. Must hold the
+ * lock. */
+static void take_slot_sockets(int slot, SRTSOCKET *sockets, int *count) {
+    if (g_active[slot].input_sock != SRT_INVALID_SOCK) {
+        sockets[(*count)++] = g_active[slot].input_sock;
+        g_active[slot].input_sock = SRT_INVALID_SOCK;
+    }
+    if (g_active[slot].output_sock != SRT_INVALID_SOCK) {
+        sockets[(*count)++] = g_active[slot].output_sock;
+        g_active[slot].output_sock = SRT_INVALID_SOCK;
+    }
+}
+
 void tracker_close_streamid(const char *streamid, int except_slot) {
     SRTSOCKET sockets[MAX_ACTIVE_SESSIONS * 2];
     int count = 0;
@@ -128,15 +143,7 @@ void tracker_close_streamid(const char *streamid, int except_slot) {
     for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
         if (!g_active[i].in_use || i == except_slot) continue;
         if (strcmp(g_active[i].streamid, streamid) != 0) continue;
-
-        if (g_active[i].input_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_active[i].input_sock;
-            g_active[i].input_sock = SRT_INVALID_SOCK;
-        }
-        if (g_active[i].output_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_active[i].output_sock;
-            g_active[i].output_sock = SRT_INVALID_SOCK;
-        }
+        take_slot_sockets(i, sockets, &count);
     }
     pthread_mutex_unlock(&g_tracker_mu);
 
@@ -166,14 +173,7 @@ void tracker_close_all(void) {
     pthread_mutex_lock(&g_tracker_mu);
     for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
         if (!g_active[i].in_use) continue;
-        if (g_active[i].input_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_active[i].input_sock;
-            g_active[i].input_sock = SRT_INVALID_SOCK;
-        }
-        if (g_active[i].output_sock != SRT_INVALID_SOCK) {
-            sockets[count++] = g_active[i].output_sock;
-            g_active[i].output_sock = SRT_INVALID_SOCK;
-        }
+        take_slot_sockets(i, sockets, &count);
     }
     pthread_mutex_unlock(&g_tracker_mu);
 
