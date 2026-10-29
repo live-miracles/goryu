@@ -243,12 +243,13 @@ void stream_state_apply_stats(int slot, const stats_sample_t *sample) {
         if (have_in_latency) g_streams[slot].input_latency_ms = in_latency_ms;
     }
     g_streams[slot].input_extra_stats_valid = have_in && !is_group_sock;
+    g_streams[slot].input_belated_avg_valid =
+        g_streams[slot].input_extra_stats_valid && sample->in_belated_avg_valid;
     if (g_streams[slot].input_extra_stats_valid) {
         g_streams[slot].input_bandwidth_mbps = in_stats.mbpsBandwidth;
         g_streams[slot].input_recv_rate_mbps = in_stats.mbpsRecvRate;
         g_streams[slot].input_belated_total = in_stats.pktRcvBelated;
         g_streams[slot].input_belated_avg_ms = in_stats.pktRcvAvgBelatedTime;
-        g_streams[slot].input_belated_avg_valid = sample->in_belated_avg_valid;
         g_streams[slot].input_undecrypt_total = in_stats.pktRcvUndecryptTotal;
         g_streams[slot].input_reorder_distance = in_stats.pktReorderDistance;
         g_streams[slot].input_rcv_buf_ms = in_stats.msRcvBuf;

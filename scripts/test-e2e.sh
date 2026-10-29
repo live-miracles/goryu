@@ -283,6 +283,7 @@ scenario_forward() {
     check "downstream output connects" wait_for 10 connected demo/key
     check "bytes are forwarded and keep growing" forwarding demo/key
     check "plain input is reported as not bonded" field_is demo/key .input.bonded false
+    check "a plain input reports belatedAvgMs" wait_for 5 field_is demo/key '.input.belatedAvgMs | type' number
     check "plain input reports the encoder's address" field_is demo/key .input.peer.ip 127.0.0.1
     check "plain input has no legs" field_is demo/key '.input.legs|length' 0
     check "status is valid JSON with the documented top-level fields" status_has \
@@ -501,6 +502,7 @@ scenario_bonded() {
     check "each leg reports its RTT" field_is demo/bond '[.input.legs[].rttMs | type] | unique | join(",")' number
     check "latency is the negotiated 240 ms, derived from the legs" field_is demo/bond .input.latencyMs 240
     check "group-level bandwidth is null, as documented" field_is demo/bond '.input.bandwidthMbps == null' true
+    check "group-level belatedAvgMs is null, as documented" field_is demo/bond '.input.belatedAvgMs == null' true
     check "group-level loss is null, as documented" field_is demo/bond '.input.recvLossTotal == null' true
     check "bytes are forwarded and keep growing" forwarding demo/bond
     sleep 5

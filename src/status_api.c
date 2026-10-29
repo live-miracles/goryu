@@ -120,9 +120,7 @@ static void write_status_response(int client_fd) {
         json_dbl_opt(f, &inf, "bandwidthMbps", s->input_extra_stats_valid, s->input_bandwidth_mbps);
         json_dbl_opt(f, &inf, "recvRateMbps", s->input_extra_stats_valid, s->input_recv_rate_mbps);
         json_ll_opt(f, &inf, "belatedTotal", s->input_extra_stats_valid, s->input_belated_total);
-        json_dbl_opt(f, &inf, "belatedAvgMs",
-                     s->input_extra_stats_valid && s->input_belated_avg_valid,
-                     s->input_belated_avg_ms);
+        json_dbl_opt(f, &inf, "belatedAvgMs", s->input_belated_avg_valid, s->input_belated_avg_ms);
         json_int_opt(f, &inf, "undecryptTotal", s->input_extra_stats_valid,
                      s->input_undecrypt_total);
         json_int_opt(f, &inf, "reorderDistance", s->input_extra_stats_valid,
@@ -152,8 +150,7 @@ static void write_status_response(int client_fd) {
             json_dbl_opt(f, &lf, "bandwidthMbps", leg->stats_valid, leg->bandwidth_mbps);
             json_dbl_opt(f, &lf, "recvRateMbps", leg->stats_valid, leg->recv_rate_mbps);
             json_ll_opt(f, &lf, "belatedTotal", leg->stats_valid, leg->belated_total);
-            json_dbl_opt(f, &lf, "belatedAvgMs", leg->stats_valid && leg->belated_avg_valid,
-                         leg->belated_avg_ms);
+            json_dbl_opt(f, &lf, "belatedAvgMs", leg->belated_avg_valid, leg->belated_avg_ms);
             json_int_opt(f, &lf, "undecryptTotal", leg->stats_valid, leg->undecrypt_total);
             json_int_opt(f, &lf, "reorderDistance", leg->stats_valid, leg->reorder_distance);
             json_int_opt(f, &lf, "rcvBufMs", leg->stats_valid, leg->rcv_buf_ms);

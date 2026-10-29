@@ -31,7 +31,7 @@ typedef struct relay_leg_state {
     double recv_rate_mbps;
     long long belated_total;
     double belated_avg_ms;
-    int belated_avg_valid;
+    int belated_avg_valid; /* implies stats_valid: read_leg sets it only after a successful read */
     int undecrypt_total;
     int reorder_distance;
     int rcv_buf_ms;
@@ -71,7 +71,7 @@ typedef struct relay_stream_state {
     double input_recv_rate_mbps;
     long long input_belated_total;
     double input_belated_avg_ms;
-    int input_belated_avg_valid;
+    int input_belated_avg_valid; /* implies input_extra_stats_valid */
     int input_undecrypt_total;
     int input_reorder_distance;
     int input_rcv_buf_ms;
