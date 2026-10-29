@@ -171,9 +171,8 @@ void set_stream_output_connected(int slot, int connected) {
     // hiding a real failure that just happened. last_error is superseded by a
     // newer set_stream_errorf() call, or reset to empty by claim_stream_state()
     // when the slot is later reused for a fresh session.
-    if (connected) {
-        g_streams[slot].retry_failures = 0;
-    }
+    // retry_failures is not reset here: a connect that succeeds does not make the
+    // downstream healthy (see OUTPUT_HEALTHY_MS in session.c).
     pthread_mutex_unlock(&g_streams_mu);
 }
 
@@ -190,6 +189,13 @@ int get_stream_retry_failures(int slot) {
     int failures = g_streams[slot].retry_failures;
     pthread_mutex_unlock(&g_streams_mu);
     return failures;
+}
+
+void reset_stream_retry_failures(int slot) {
+    if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
+    pthread_mutex_lock(&g_streams_mu);
+    g_streams[slot].retry_failures = 0;
+    pthread_mutex_unlock(&g_streams_mu);
 }
 
 void record_stream_input_progress(int slot) {

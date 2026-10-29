@@ -17,6 +17,13 @@ rejects the stream afterwards, for example a publish hook refusing an
 unauthorized stream key. Without backoff that case reconnected every 10 to 40 ms
 indefinitely in production.
 
+The retry count is cleared only after the downstream connection has stayed up for
+10 s. Neither a successful connect nor packets sent show the downstream is healthy:
+libsrt takes packets into its send buffer before the downstream's rejection
+arrives, so clearing the count on either made that case retry after 1 s, forever,
+instead of backing off. It also means `retryFailures` can stay above 0 for up to
+10 s after a downstream recovers.
+
 When libsrt reports a reject reason, it is included in that stream's
 `lastError`, and the retry count is `retryFailures` in the
 [status API](../4-reference/1-status-api.md).

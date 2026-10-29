@@ -184,7 +184,8 @@ Three layers, all run by CI (details in `docs/4-reference/3-development.md`):
 - `bash scripts/test-e2e.sh` (needs ffmpeg, jq, Docker; about three minutes) - the
   relay with real publishers and downstreams: forwarding, retry and recovery,
   duplicate rejection and stale takeover, passphrase handling, shutdown, bad config,
-  connection churn, and bonded input via `tests/e2e/bonded_caller.c`.
+  connection churn, a downstream that accepts and then drops (`tests/e2e/closing_sink.c`),
+  and bonded input via `tests/e2e/bonded_caller.c`.
 
 Run all three for a code change. Rules:
 

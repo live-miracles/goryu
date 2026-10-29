@@ -26,7 +26,9 @@ Top-level fields:
 
 Each `streamStates[]` entry:
 
-- `streamId`, `inputActive`, `outputConnected`, `retryFailures`
+- `streamId`, `inputActive`, `outputConnected`
+- `retryFailures`: failed downstream attempts (connect or send) since the downstream
+  last stayed connected for 10 s; it can be above 0 while `outputConnected` is `true`
 - `forwardedPackets`, `forwardedBytes`, `lastPacketAt`, `lastInputPacketAt`:
   Goryu-tracked forwarding progress
 - `input`: everything SRT reports about the (possibly bonded) input — see below

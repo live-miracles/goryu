@@ -7,6 +7,8 @@
 # loopback source addresses (127.0.0.1 and 127.0.0.2), which gives the relay two
 # distinct peers on one machine. It is built once into objs/ with the image that
 # scripts/build-local.sh makes; E2E_SKIP_BONDED=1 skips the bonded scenarios.
+# tests/e2e/closing_sink.c, a downstream that accepts the handshake and then drops
+# the connection, is built the same way.
 #
 #   bash scripts/test-e2e.sh [scenario ...]    (default: all)
 #
@@ -21,6 +23,7 @@ LIB_DIR="${GORYU_LIB_DIR:-$REPO_DIR/objs/lib}"
 BASE_PORT="${E2E_BASE_PORT:-24000}"
 PASSPHRASE="e2e-passphrase-0123"
 BONDED="$REPO_DIR/objs/bonded-caller"
+CLOSING_SINK="$REPO_DIR/objs/closing-sink"
 
 for tool in ffmpeg curl jq ss; do
     command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: $tool is required" >&2; exit 2; }
@@ -93,12 +96,23 @@ start_sink() { # start_sink [passphrase]; sets SINK_PID
     PIDS+=("$SINK_PID")
 }
 
+# PUB_RATE=4M sends a 720p stream of that bitrate instead of the tiny default one: a
+# real encoder sends a packet every few milliseconds, which the default does not.
 start_pub() { # start_pub <streamid> [passphrase] [seconds]; sets PUB_PID
     local extra=""
     [[ -n "${2:-}" ]] && extra="&passphrase=$2&pbkeylen=16"
+    local video=(-f lavfi -i testsrc=size=160x90:rate=15)
+    # A keyframe every second: a downstream that joins mid-stream (after a retry) can
+    # start decoding at once. With x264's default of 250 frames the ffmpeg sink gives
+    # up probing after about 7 s and drops the connection.
+    local encode=(-c:v libx264 -preset ultrafast -tune zerolatency -g 15)
+    if [[ -n "${PUB_RATE:-}" ]]; then
+        video=(-f lavfi -i testsrc2=size=1280x720:rate=30)
+        encode=(-c:v libx264 -preset ultrafast -tune zerolatency -b:v "$PUB_RATE" -maxrate "$PUB_RATE" -bufsize 1M)
+    fi
     ffmpeg -nostdin -hide_banner -loglevel error -re \
-        -f lavfi -i testsrc=size=160x90:rate=15 -t "${3:-120}" \
-        -c:v libx264 -preset ultrafast -tune zerolatency -f mpegts "srt://127.0.0.1:$IN?streamid=$1&transtype=live$extra" \
+        "${video[@]}" -t "${3:-120}" \
+        "${encode[@]}" -f mpegts "srt://127.0.0.1:$IN?streamid=$1&transtype=live$extra" \
         >>"$WORK/pub.log" 2>&1 &
     PUB_PID=$!
     PIDS+=("$PUB_PID")
@@ -155,17 +169,20 @@ exited_within() { # exited_within <pid> <seconds>
 
 # --- bonded input -----------------------------------------------------------
 
-build_bonded_caller() {
-    local source="$REPO_DIR/tests/e2e/bonded_caller.c"
-    [[ -x "$BONDED" && "$BONDED" -nt "$source" ]] && return 0
-    command -v docker >/dev/null 2>&1 || { echo "  (docker is needed to build the bonded caller)"; return 1; }
+# build_test_tool <name>: builds tests/e2e/<name with - as _>.c into objs/<name>
+# with the image that scripts/build-local.sh makes.
+build_test_tool() {
+    local name="$1" source="$REPO_DIR/tests/e2e/${1//-/_}.c"
+    [[ -x "$REPO_DIR/objs/$name" && "$REPO_DIR/objs/$name" -nt "$source" ]] && return 0
+    command -v docker >/dev/null 2>&1 || { echo "  (docker is needed to build $name)"; return 1; }
     local image="goryu-dev:${SRT_TAG:-v1.5.6}"
     docker image inspect "$image" >/dev/null 2>&1 || { echo "  (image $image is missing: run scripts/build-local.sh)"; return 1; }
     mkdir -p "$REPO_DIR/objs"
     docker run --rm --user "$(id -u):$(id -g)" -v "$REPO_DIR":/w -w /w "$image" \
-        sh -c 'gcc -O2 -Wall -Wextra -o objs/bonded-caller tests/e2e/bonded_caller.c $(pkg-config --cflags --libs srt) -lpthread' \
-        >"$WORK/bonded-build.log" 2>&1 || { cat "$WORK/bonded-build.log"; return 1; }
+        sh -c "gcc -O2 -Wall -Wextra -o objs/$name tests/e2e/${name//-/_}.c \$(pkg-config --cflags --libs srt) -lpthread" \
+        >"$WORK/$name-build.log" 2>&1 || { cat "$WORK/$name-build.log"; return 1; }
 }
+build_bonded_caller() { build_test_tool bonded-caller; }
 
 BOND_N=0
 # start_bonded <streamid> [bonded_caller options...]: ffmpeg test pattern piped
@@ -290,8 +307,30 @@ scenario_downstream_down() {
     check "relay is still alive" kill -0 "$GPID"
     start_sink
     check "recovers by itself once the downstream appears" wait_for 25 connected demo/down
-    check "retry counter resets after recovery" field_is demo/down .retryFailures 0
+    # Cleared once the downstream connection has stayed up for OUTPUT_HEALTHY_MS (10 s).
+    check "retry counter resets once the downstream has stayed up" wait_for 15 field_is demo/down .retryFailures 0
     check "data flows after recovery" forwarding demo/down
+}
+
+# The downstream accepts the handshake, so every connect succeeds, and drops the
+# connection 50 ms later, while the relay is already sending at a real encoder's rate. The retry delay has to
+# keep growing across those cycles: a successful connect (or a few packets accepted
+# into libsrt's send buffer before the drop) does not mean the downstream is healthy.
+scenario_downstream_drops() {
+    ports 22
+    write_config "$WORK/c.json" ""
+    start_goryu "$WORK/c.json" "$WORK/g.log"
+    LD_LIBRARY_PATH="$LIB_DIR" "$CLOSING_SINK" --port "$OUT" --hold-ms 50 >"$WORK/closing-sink.log" 2>&1 &
+    PIDS+=("$!")
+    check "the closing sink is listening" wait_for 5 ss -Hlnu "sport = :$OUT"
+    PUB_RATE=4M start_pub "demo/drop"
+    check "the downstream accepted the relay's connection" wait_for 10 log_has "accepted" "$WORK/closing-sink.log"
+    check "send failures are retried with the first delay" wait_for 15 log_has "Output send retry .* failures=1 retry_ms=1000" "$WORK/g.log"
+    check "the delay doubles on the next failure" wait_for 15 log_has "Output send retry .* failures=2 retry_ms=2000" "$WORK/g.log"
+    check "and again" wait_for 25 log_has "Output send retry .* failures=3 retry_ms=4000" "$WORK/g.log"
+    check "the status shows the count" field_ge demo/drop .retryFailures 3
+    check "the publisher stays connected" active demo/drop
+    check "relay is still alive" kill -0 "$GPID"
 }
 
 scenario_duplicate() {
@@ -661,7 +700,7 @@ scenario_churn() {
 
 # --- run --------------------------------------------------------------------
 
-ALL=(cli bad_config uri_mode output_passphrase forward downstream_down duplicate takeover two_streams passphrase sigterm
+ALL=(cli bad_config uri_mode output_passphrase forward downstream_down downstream_drops duplicate takeover two_streams passphrase sigterm
     shutdown_silent churn bonded bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
     bonded_abrupt_end)
 SELECTED=("${@:-${ALL[@]}}")
@@ -675,6 +714,10 @@ for name in "${SELECTED[@]}"; do
             continue
         fi
     fi
+    if [[ "$name" == downstream_drops ]] && ! build_test_tool closing-sink; then
+        echo "== $name"; FAIL=$((FAIL + 1)); FAILED+=("$name: the closing sink could not be built"); echo "  FAIL  closing sink is available"
+        continue
+    fi
     echo "== $name"
     : >"$WORK/sink.log"; : >"$WORK/pub.log"; : >"$WORK/bonded.log"
     failed_before=$FAIL
@@ -685,6 +728,8 @@ for name in "${SELECTED[@]}"; do
         tail -n 40 "$WORK/g.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
         echo "  --- publisher log, last 20 lines"
         tail -n 20 "$WORK/pub.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
+        echo "  --- downstream sink log, last 20 lines"
+        tail -n 20 "$WORK/sink.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
         echo "  --- bonded caller log, last 20 lines"
         tail -n 20 "$WORK/bonded.log" 2>/dev/null | cut -c1-300 | sed 's/^/  | /'
         echo "  --- status"

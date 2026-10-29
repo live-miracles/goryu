@@ -37,10 +37,11 @@ a `streamStates` field and the pid of the process it started.
 - **End-to-end tests** (`scripts/test-e2e.sh`) start the relay, a downstream and
   ffmpeg publishers on spare ports (`E2E_BASE_PORT`, default 24000) and a private
   work dir, so a running relay is not touched. They need `ffmpeg` with SRT, `curl`,
-  `jq` and `ss` (plus Docker for the bonded caller), and take about three minutes.
-  A scenario with a failed check prints the relay's last 40 log lines and the status
+  `jq` and `ss` (plus Docker for the bonded caller and the closing sink), and take about three minutes.
+  A scenario with a failed check prints the relay's last 40 log lines, the tails of the
+  publisher, downstream sink and bonded caller logs, and the status
   API response, because the work dir is gone once CI ends. Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
-  duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
+  downstream_drops duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
   bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
   bonded_abrupt_end`.
 - **Bonded input is simulated.** ffmpeg cannot open a socket group, so
@@ -59,6 +60,13 @@ a `streamStates` field and the pid of the process it started.
   `E2E_SKIP_BONDED=1` skips these scenarios. What it cannot do is real network
   conditions: loss, jitter, latency or a physical link failing, so the per-leg loss
   and retransmission counters are only checked for presence, not for values.
+- **A downstream that accepts and then drops** is `tests/e2e/closing_sink.c`: a libsrt
+  listener that accepts the handshake and closes the connection 50 ms later, as a
+  downstream does when a publish hook refuses the stream key. ffmpeg as a listener
+  cannot do it. `downstream_drops` uses it with a 4 Mbps publisher (`PUB_RATE`) and checks that
+  the retry delay keeps doubling: a quiet publisher would let a fix that is wrong for a
+  real encoder pass, because it rarely has a packet to send inside those 50 ms. It is
+  built into `objs/closing-sink` like the bonded caller.
 - **Docker packaging** (`scripts/test-docker.sh`) builds `docker/Dockerfile`, which
   installs a published release, and checks the version, that it does not run as root,
   that a missing config is refused, that the status API answers, that `docker stop`
