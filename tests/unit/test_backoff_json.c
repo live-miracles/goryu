@@ -1,4 +1,5 @@
-/* Retry backoff (src/backoff.c) and the status API's JSON writers (src/json_out.c). */
+/* Retry backoff and retry state (src/backoff.c) and the status API's JSON writers (src/json_out.c).
+ */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* open_memstream */
@@ -34,6 +35,71 @@ static void test_backoff_never_decreases_and_is_bounded(void) {
         CHECK(d >= 1000 && d <= 16000);
         prev = d;
     }
+}
+
+static void test_retry_escalates_when_connects_succeed_and_sends_fail(void) {
+    /* The downstream accepts the handshake and drops the connection 50 ms later: every
+     * cycle is a successful connect followed by a failed send. */
+    static const int expect[] = {1000, 2000, 4000, 8000, 16000, 16000};
+    retry_state_t r;
+    retry_init(&r);
+    long long now = 5000;
+    for (int i = 0; i < 6; ++i) {
+        retry_connected(&r, now);
+        CHECK(!retry_check_healthy(&r, now + 10));
+        now += 50;
+        CHECK(retry_failed(&r, now) == expect[i]);
+        CHECK(r.failures == i + 1);
+        CHECK(!retry_due(&r, now + expect[i] - 1));
+        CHECK(retry_due(&r, now + expect[i]));
+        now += expect[i];
+    }
+}
+
+static void test_retry_clears_after_the_healthy_period(void) {
+    retry_state_t r;
+    retry_init(&r);
+    retry_failed(&r, 0);
+    retry_failed(&r, 1000);
+    CHECK(r.failures == 2);
+
+    retry_connected(&r, 4000);
+    CHECK(!retry_check_healthy(&r, 4000 + OUTPUT_HEALTHY_MS - 1));
+    CHECK(r.failures == 2);
+    CHECK(retry_check_healthy(&r, 4000 + OUTPUT_HEALTHY_MS));
+    CHECK(r.failures == 0);
+    /* Once per connection, and a healthy connection that fails starts over. */
+    CHECK(!retry_check_healthy(&r, 4000 + 2 * OUTPUT_HEALTHY_MS));
+    CHECK(retry_failed(&r, 40000) == 1000);
+    CHECK(r.failures == 1);
+}
+
+static void test_retry_failure_after_the_healthy_period_starts_over(void) {
+    /* The failure arrives before anything called retry_check_healthy, for example
+     * during a receive that blocked past the healthy time. */
+    retry_state_t r;
+    retry_init(&r);
+    retry_failed(&r, 0);
+    retry_failed(&r, 1000);
+    retry_failed(&r, 3000);
+    retry_connected(&r, 10000);
+    CHECK(retry_failed(&r, 10000 + OUTPUT_HEALTHY_MS - 1) == 8000);
+    CHECK(r.failures == 4);
+
+    retry_connected(&r, 100000);
+    CHECK(retry_failed(&r, 100000 + OUTPUT_HEALTHY_MS) == 1000);
+    CHECK(r.failures == 1);
+}
+
+static void test_retry_connect_failures_without_a_connection(void) {
+    retry_state_t r;
+    retry_init(&r);
+    CHECK(retry_due(&r, 0));
+    CHECK(!retry_check_healthy(&r, 1000000));
+    CHECK(retry_failed(&r, 100) == 1000);
+    CHECK(retry_failed(&r, 1100) == 2000);
+    CHECK(r.next_attempt_at_ms == 3100);
+    CHECK(r.up_at_ms == 0);
 }
 
 /* Runs fn against an in-memory FILE and returns the text it wrote. */
@@ -174,6 +240,10 @@ int main(void) {
     test_backoff_sequence();
     test_backoff_edges();
     test_backoff_never_decreases_and_is_bounded();
+    test_retry_escalates_when_connects_succeed_and_sends_fail();
+    test_retry_clears_after_the_healthy_period();
+    test_retry_failure_after_the_healthy_period_starts_over();
+    test_retry_connect_failures_without_a_connection();
     test_escaping();
     test_escaping_long_string();
     test_object_commas_and_types();

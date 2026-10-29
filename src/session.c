@@ -28,14 +28,6 @@
 #define RECV_TIMEOUT_MS 1000
 #define DUPLICATE_TAKEOVER_WAIT_MS 5000
 #define DUPLICATE_TAKEOVER_STALE_MS 5000
-/* How long the downstream connection must stay up before the retry count is
- * cleared. A downstream that accepts the handshake and then rejects the stream (a
- * publish hook refusing the key) drops the connection within tens of milliseconds,
- * after libsrt has already accepted a few packets into its send buffer, so neither
- * a successful connect nor a successful send shows the downstream is healthy.
- * Clearing the count on either made every such cycle retry after 1 s, forever.
- * The value is well above the 10 to 40 ms between reconnects seen in production. */
-#define OUTPUT_HEALTHY_MS 10000
 
 typedef struct session_args {
     SRTSOCKET conn;
@@ -153,23 +145,32 @@ static SRTSOCKET connect_srt_output(const output_target_t *target, const char *s
     return srt_out;
 }
 
-/* Tries once. On failure it counts the failure, records why in the stream's
- * lastError and sets *next_retry_at_ms from the backoff table. */
+/* Counts a failed connect or send, schedules the next attempt and publishes the
+ * count. `what` names the step in the retry log line. Returns the delay in ms. */
+static int record_output_failure(retry_state_t *retry, int state_slot, const char *what,
+                                 const char *streamid) {
+    int delay_ms = retry_failed(retry, now_ms());
+    set_stream_retry_failures(state_slot, retry->failures);
+    relay_logf("Output %s retry streamid=%s failures=%d retry_ms=%d\n", what,
+               streamid_or_empty(streamid), retry->failures, delay_ms);
+    return delay_ms;
+}
+
+/* Tries once. On success it starts the healthy-period clock; on failure it counts
+ * the failure and records why in the stream's lastError. */
 static SRTSOCKET connect_srt_output_with_retry(const output_target_t *target, const char *streamid,
                                                int state_slot, int tracker_slot,
-                                               long long *next_retry_at_ms) {
+                                               retry_state_t *retry) {
     char output_error[512];
     SRTSOCKET srt_out =
         connect_srt_output(target, streamid, tracker_slot, output_error, sizeof output_error);
     if (srt_out != SRT_INVALID_SOCK) {
         set_stream_output_connected(state_slot, 1);
-        if (next_retry_at_ms) *next_retry_at_ms = 0;
+        retry_connected(retry, now_ms());
         return srt_out;
     }
 
-    increment_stream_retry_failures(state_slot);
-    int failures = get_stream_retry_failures(state_slot);
-    int delay_ms = retry_delay_ms(failures);
+    int delay_ms = record_output_failure(retry, state_slot, "publish", streamid);
     set_stream_output_connected(state_slot, 0);
     if (output_error[0]) {
         set_stream_errorf(state_slot,
@@ -179,9 +180,6 @@ static SRTSOCKET connect_srt_output_with_retry(const output_target_t *target, co
         set_stream_errorf(state_slot, "Failed to publish to downstream output; retrying in %d ms",
                           delay_ms);
     }
-    relay_logf("Output publish retry streamid=%s failures=%d retry_ms=%d\n",
-               streamid_or_empty(streamid), failures, delay_ms);
-    if (next_retry_at_ms) *next_retry_at_ms = now_ms() + delay_ms;
     return SRT_INVALID_SOCK;
 }
 
@@ -248,8 +246,7 @@ static int acquire_stream_state(const char *streamid, int tracker_slot, int *sta
  * indefinitely). So it goes through the same backoff table as a failed connect. */
 static void handle_output_send_failure(const output_target_t *target, int state_slot,
                                        int tracker_slot, SRTSOCKET *srt_out, const char *streamid,
-                                       const char *peer_ip, int peer_port,
-                                       long long *next_output_retry_at_ms) {
+                                       const char *peer_ip, int peer_port, retry_state_t *retry) {
     char out_ip[INET6_ADDRSTRLEN] = "?";
     int out_port = 0;
     format_leg_addr(&target->out_addr, out_ip, sizeof out_ip, &out_port);
@@ -262,12 +259,7 @@ static void handle_output_send_failure(const output_target_t *target, int state_
     close_output(tracker_slot, *srt_out);
     *srt_out = SRT_INVALID_SOCK;
 
-    increment_stream_retry_failures(state_slot);
-    int failures = get_stream_retry_failures(state_slot);
-    int delay_ms = retry_delay_ms(failures);
-    *next_output_retry_at_ms = now_ms() + delay_ms;
-    relay_logf("Output send retry streamid=%s failures=%d retry_ms=%d\n",
-               streamid_or_empty(streamid), failures, delay_ms);
+    record_output_failure(retry, state_slot, "send", streamid);
 }
 
 static void *session_main(void *arg) {
@@ -310,24 +302,18 @@ static void *session_main(void *arg) {
     }
 
     SRTSOCKET srt_out = SRT_INVALID_SOCK;
-    long long next_output_retry_at_ms = 0;
-    long long output_up_at_ms = 0; /* when the output connected; 0 once it is healthy or down */
+    retry_state_t retry;
+    retry_init(&retry);
     set_stream_input_info(state_slot, input_bonded, peer_ip, peer_port);
-    srt_out = connect_srt_output_with_retry(target, streamid, state_slot, tracker_slot,
-                                            &next_output_retry_at_ms);
-    if (srt_out != SRT_INVALID_SOCK) output_up_at_ms = now_ms();
+    srt_out = connect_srt_output_with_retry(target, streamid, state_slot, tracker_slot, &retry);
 
     char buf[CHUNK];
     while (relay_running() && stream_input_still_connected(conn)) {
-        if (srt_out == SRT_INVALID_SOCK && now_ms() >= next_output_retry_at_ms) {
-            srt_out = connect_srt_output_with_retry(target, streamid, state_slot, tracker_slot,
-                                                    &next_output_retry_at_ms);
-            if (srt_out != SRT_INVALID_SOCK) output_up_at_ms = now_ms();
+        if (srt_out == SRT_INVALID_SOCK && retry_due(&retry, now_ms())) {
+            srt_out =
+                connect_srt_output_with_retry(target, streamid, state_slot, tracker_slot, &retry);
         }
-        if (output_up_at_ms && now_ms() - output_up_at_ms >= OUTPUT_HEALTHY_MS) {
-            reset_stream_retry_failures(state_slot);
-            output_up_at_ms = 0;
-        }
+        if (retry_check_healthy(&retry, now_ms())) set_stream_retry_failures(state_slot, 0);
 
         SRT_MSGCTRL mc = srt_msgctrl_default;
         int r = srt_recvmsg2(conn, buf, CHUNK, &mc);
@@ -356,8 +342,7 @@ static void *session_main(void *arg) {
         if (srt_out != SRT_INVALID_SOCK) {
             if (srt_sendmsg2(srt_out, buf, r, NULL) == SRT_ERROR) {
                 handle_output_send_failure(target, state_slot, tracker_slot, &srt_out, streamid,
-                                           peer_ip, peer_port, &next_output_retry_at_ms);
-                output_up_at_ms = 0;
+                                           peer_ip, peer_port, &retry);
                 continue;
             }
             record_stream_forward_progress(state_slot, r);

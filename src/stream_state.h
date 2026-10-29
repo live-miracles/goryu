@@ -142,9 +142,7 @@ int stream_input_age_ms(const char *streamid, long long now, long long *age_ms);
 void remove_stream_state(int slot);
 void set_stream_input_info(int slot, int bonded, const char *peer_ip, int peer_port);
 void set_stream_output_connected(int slot, int connected);
-void increment_stream_retry_failures(int slot);
-int get_stream_retry_failures(int slot);
-void reset_stream_retry_failures(int slot);
+void set_stream_retry_failures(int slot, int failures);
 void record_stream_input_progress(int slot);
 void record_stream_forward_progress(int slot, int bytes);
 

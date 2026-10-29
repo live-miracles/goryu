@@ -28,7 +28,7 @@ small modules listed [below](#modules). It has three kinds of thread.
 | `relay_config.c` | `goryu.json`, URI and query parsing, passphrase rules, URI redaction |
 | `srt_opts.c` | Applies SRT options from a query and reports a refused one |
 | `ratelimit.c` | A fixed window that lets a few events through and counts the rest (used for the leg join/leave log lines) |
-| `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays |
+| `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays and one session's retry state |
 
 The tracker and the stream state use the same slot index for a session. Both are
 guarded by their own mutex and are never held at the same time, except that the
