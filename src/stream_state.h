@@ -133,9 +133,11 @@ void set_last_errorf(const char *fmt, ...) __attribute__((format(printf, 1, 2)))
  * session without a streamid (slot -1) can call them freely. */
 void set_stream_errorf(int slot, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
+/* What claim_stream_state returns when another session already holds the streamid. */
+#define CLAIM_STREAM_IN_USE (-2)
+
 /* Claims the slot for streamid. Returns the slot, -1 for an empty streamid or
- * when preferred_slot is taken, or -2 when another session already holds the
- * streamid. */
+ * when preferred_slot is taken, or CLAIM_STREAM_IN_USE. */
 int claim_stream_state(const char *streamid, int preferred_slot);
 /* 0 and the age of the stream's last input packet, or -1 if streamid is unknown. */
 int stream_input_age_ms(const char *streamid, long long now, long long *age_ms);
