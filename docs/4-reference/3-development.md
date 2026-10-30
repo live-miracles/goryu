@@ -33,7 +33,10 @@ a `streamStates` field and the pid of the process it started.
   URI parsing, the passphrase rules and redaction, the retry backoff, the JSON
   writers, the deadline-bound send (over a socketpair), the telemetry rules (a libsrt
   reading is a struct), the status JSON with every null rule, the stream state
-  table (its log and clock stubbed), and the command line (every way it is refused). Each test is built with the release's `gcc -Wall -Wextra` plus `-Werror`,
+  table (its log and clock stubbed), a session's place in the relay (the tracker: the
+  duplicate wait, takeover and release against a fake clock and a recorded `srt_close`,
+  built with a stand-in `srt/srt.h` from `tests/unit/fake/`), and the command line (every
+  way it is refused). Each test is built with the release's `gcc -Wall -Wextra` plus `-Werror`,
   under AddressSanitizer and UndefinedBehaviorSanitizer. A new check
   goes in the matching `tests/unit/test_*.c`.
 - **End-to-end tests** (`scripts/test-e2e.sh`) start the relay, a downstream and

@@ -22,8 +22,8 @@ small modules listed [below](#modules). It has three kinds of thread.
 | `goryu.c` | Entry point: the listener, the accept loop, shutdown order |
 | `relay_options.c` | The command line (a config file or two URIs) and the status port variable, turned into one options struct. Pure |
 | `session.c` | One session thread: streamid, [duplicate publishers](../3-operations/1-reliability.md#duplicate-publishers), downstream connect and [retry](../3-operations/1-reliability.md#downstream-retry), the read/send loop |
-| `tracker.c` | The sockets of every live session, so one thread can close another's and the sampler never reads a closed socket |
-| `stream_state.c` | The shared, mutex-protected telemetry per stream, at the session's slot; a stream's claim on its streamid; the process-level `lastError` |
+| `tracker.c` | A session's place in the relay: its slot, its sockets (so one thread can close another's and the sampler never reads a closed socket), the streamid it holds, the duplicate-publisher wait and takeover, and the one release every session ends with |
+| `stream_state.c` | The shared, mutex-protected telemetry per stream, at the session's slot (begun and ended by the tracker); the process-level `lastError` |
 | `stats.c` | The libsrt side of telemetry: reads a session's counters into a plain sample and applies no rule |
 | `telemetry.c` | The rules that turn a sample into what the status API reports: which values are valid, totals only moving forward, a bonded group's latency, legs joining and leaving. Pure |
 | `status_json.c`, `json_out.c` | The status JSON written from a snapshot it is handed (pure), and the JSON writers |
@@ -37,9 +37,12 @@ small modules listed [below](#modules). It has three kinds of thread.
 A session has one slot, and it indexes both tables: the tracker's (its sockets) and
 the stream state's (its telemetry). A stream is only ever stored in its own session's
 slot, and a session with an empty streamid holds no stream, so the stream-state calls
-ignore it. A session removes its stream before it releases the slot. The two tables
-are guarded by their own mutex and are never held at the same time, except that the
-stats sampler holds the tracker's while it calls libsrt.
+ignore it. The tracker alone decides who holds a streamid, and begins and ends the
+stream in the stream state ([ADR 0015](../adr/0015-the-tracker-decides-who-holds-a-streamid.md));
+`tracker_release` ends the stream before it frees the slot, so a session cannot end
+without doing both. The two tables are guarded by their own mutex. The tracker takes the
+stream state's while holding its own and never the other way round; the stats sampler
+holds the tracker's while it calls libsrt but takes no stream-state lock under it.
 
 ## Listener
 

@@ -33,7 +33,7 @@ When libsrt reports a reject reason, it is included in that stream's
 A second connection with a streamid that is already active waits up to 5 s:
 
 - if the existing session's input has been silent for 5 s, it is treated as
-  stale, force-closed, and the new publisher takes over
+  stale, force-closed (only that session), and the new publisher takes over
   (`Duplicate publisher takeover for stale streamid=...`);
 - otherwise the new connection is rejected
   (`Duplicate publisher rejected for active streamid=...`).

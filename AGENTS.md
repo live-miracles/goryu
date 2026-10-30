@@ -78,18 +78,21 @@ Navigation only; correct an entry when a change makes it stale.
 - `src/relay_options.c` - the command line (a config file or two URIs) and the
   `SRT_BONDING_STATUS_PORT` override turned into one options struct; pure, so a
   refusal is a message and is unit-tested.
-- `src/session.c` - one session thread (`session_main`): streamid, duplicate
-  takeover (`acquire_stream_state`), downstream connect and backoff, the
-  read/send loop (it wakes every `RECV_TIMEOUT_MS` so a closed session ends);
-  `session_spawn` starts it.
-- `src/tracker.c` - the sockets of every live session (slot table, `tracker_*`);
-  how one thread closes another's and how shutdown waits for all of them.
+- `src/session.c` - one session thread (`session_main`): streamid, downstream
+  connect and backoff, the read/send loop (it wakes every `RECV_TIMEOUT_MS` so a
+  closed session ends); `session_spawn` starts it.
+- `src/tracker.c` - a session's place in the relay (slot table, `tracker_*`): its
+  sockets (how one thread closes another's, how shutdown waits for all of them), the
+  streamid it holds, the duplicate wait and takeover (`tracker_acquire_stream`), and
+  `tracker_release`, the one call every session ends with. Unit-tested against a fake
+  clock and a recorded `srt_close`, with `tests/unit/fake/srt/srt.h` standing in for libsrt.
 - `src/stream_state.c` - the mutex-protected per-stream telemetry, at the session's
-  slot (the same index as the tracker's); a stream's claim on its streamid; the
-  process `lastError`; `stream_state_snapshot`. Its functions ignore a slot that holds
-  no stream. Unit-tested with the log and clock stubbed.
-- `src/stats.c` - the libsrt side of telemetry: reads counters under the tracker lock
-  into a plain `stats_sample_t` and applies no rule.
+  slot (the same index as the tracker's), begun and ended by the tracker; the
+  process `lastError`; `stream_state_snapshot`; `stream_state_sample_due`, the
+  once-a-second sampling throttle. Its functions ignore a slot that holds no stream.
+  Unit-tested with the log and clock stubbed.
+- `src/stats.c` - the libsrt side of telemetry: reads counters inside
+  `tracker_read_sockets` (the tracker lock held) into a plain `stats_sample_t` and applies no rule.
 - `src/telemetry.c` - the rules that turn a sample into what the status API reports
   (which values are valid, totals only move forward, group latency, bonded leg
   join/leave); pure and unit-tested ([ADR 0014](docs/adr/0014-telemetry-rules-are-pure-and-libsrt-is-read-in-one-place.md)).

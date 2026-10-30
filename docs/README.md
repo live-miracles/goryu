@@ -40,3 +40,4 @@ Why Goryu is built the way it is; each record names the alternatives that were r
 - [0012 goryu.json is read by a strict scanner](adr/0012-goryu-json-is-read-by-a-strict-scanner.md)
 - [0013 The status API is loopback-only and unauthenticated](adr/0013-status-api-is-loopback-only-and-unauthenticated.md)
 - [0014 Telemetry rules are pure and libsrt is read in one place](adr/0014-telemetry-rules-are-pure-and-libsrt-is-read-in-one-place.md)
+- [0015 The tracker decides who holds a streamid, and one release ends a session](adr/0015-the-tracker-decides-who-holds-a-streamid.md)

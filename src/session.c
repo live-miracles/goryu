@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "backoff.h"
 #include "log.h"
@@ -26,8 +25,6 @@
  * group: libsrt defers closing a group that is in use. Waking once a second lets
  * the session notice that it was closed. */
 #define RECV_TIMEOUT_MS 1000
-#define DUPLICATE_TAKEOVER_WAIT_MS 5000
-#define DUPLICATE_TAKEOVER_STALE_MS 5000
 /* Room for the longest connect failure message: a 1023-byte streamid, libsrt's error
  * text and the reject reason. */
 #define OUTPUT_ERROR_MAX 2048
@@ -44,8 +41,8 @@ typedef struct session_args {
  * same handful of values each time. */
 typedef struct session {
     const output_target_t *target;
-    /* This session's slot: its sockets are in the tracker's table and, once it holds a
-     * stream, its telemetry is at the same index in the stream state's. */
+    /* This session's slot: its sockets and streamid are in the tracker's table and, once
+     * it holds a stream, its telemetry is at the same index in the stream state's. */
     int slot;
     char streamid[1024];
     char peer_ip[INET6_ADDRSTRLEN];
@@ -193,60 +190,6 @@ static void connect_srt_output_with_retry(session_t *s) {
     }
 }
 
-/* ---- duplicate publishers ---- */
-
-/* Claims the stream's state for this session. A streamid that is already active
- * waits up to DUPLICATE_TAKEOVER_WAIT_MS: if the holder's input has been silent
- * for DUPLICATE_TAKEOVER_STALE_MS it is closed and replaced, otherwise this
- * session is rejected. Returns 0 to carry on (a session with an empty streamid has
- * no stream and carries on without one), or -1 after logging why the session
- * must end. */
-static int acquire_stream_state(session_t *s) {
-    claim_result_t claim = claim_stream_state(s->streamid, s->slot);
-
-    if (claim == CLAIM_STREAM_IN_USE) {
-        long long deadline = now_ms() + DUPLICATE_TAKEOVER_WAIT_MS;
-        int takeover_started = 0;
-        do {
-            long long now = now_ms();
-            long long input_age_ms = 0;
-            int stream_present = stream_input_age_ms(s->streamid, now, &input_age_ms) == 0;
-
-            if (!stream_present) {
-                claim = claim_stream_state(s->streamid, s->slot);
-                if (claim != CLAIM_STREAM_IN_USE) break;
-            } else if (input_age_ms >= DUPLICATE_TAKEOVER_STALE_MS) {
-                if (!takeover_started) {
-                    set_last_errorf("Duplicate publisher takeover for stale streamid=%s",
-                                    s->streamid);
-                    relay_logf("Duplicate publisher takeover for stale streamid=%s\n", s->streamid);
-                    tracker_close_streamid(s->streamid, s->slot);
-                    takeover_started = 1;
-                }
-                claim = claim_stream_state(s->streamid, s->slot);
-                if (claim != CLAIM_STREAM_IN_USE) break;
-            }
-
-            struct timespec ts;
-            ts.tv_sec = 0;
-            ts.tv_nsec = 50 * 1000 * 1000;
-            nanosleep(&ts, NULL);
-        } while (relay_running() && now_ms() < deadline);
-
-        if (claim == CLAIM_STREAM_IN_USE) {
-            set_last_errorf("Duplicate publisher rejected for active streamid=%s", s->streamid);
-            relay_logf("Duplicate publisher rejected for active streamid=%s\n", s->streamid);
-            return -1;
-        }
-    }
-    if (claim == CLAIM_STREAM_SLOT_BUSY) {
-        set_last_errorf("No stream state slot available for streamid=%s", s->streamid);
-        relay_logf("No stream state slot available for streamid=%s\n", s->streamid);
-        return -1;
-    }
-    return 0;
-}
-
 /* ---- the session ---- */
 
 /* A send failure almost always means the transport-level connect succeeded (SRS
@@ -293,7 +236,6 @@ static void *session_main(void *arg) {
             s.streamid[0] = '\0';
         }
     }
-    tracker_set_streamid(s.slot, s.streamid);
 
     int input_bonded = (conn & SRTGROUP_MASK) != 0;
     int recv_timeout_ms = RECV_TIMEOUT_MS;
@@ -305,7 +247,7 @@ static void *session_main(void *arg) {
     relay_logf("Accepted %s SRT source peer=%s:%d streamid=%s\n", input_bonded ? "bonded" : "plain",
                s.peer_ip, s.peer_port, streamid_or_empty(s.streamid));
 
-    if (acquire_stream_state(&s) != 0) {
+    if (tracker_acquire_stream(s.slot, s.streamid) != 0) {
         tracker_release(s.slot, conn);
         return NULL;
     }
@@ -358,9 +300,6 @@ static void *session_main(void *arg) {
     if (!relay_running()) close_reason = "shutdown";
     update_stream_srt_counters(s.slot, conn, s.srt_out, 1);
     if (s.srt_out != SRT_INVALID_SOCK) close_output(s.slot, s.srt_out);
-    /* The stream goes before the slot is released: the next session to get this slot
-     * claims it, and a slot that still holds a stream is refused. */
-    remove_stream_state(s.slot);
     relay_logf("Connection closed peer=%s:%d streamid=%s reason=%s duration_ms=%lld "
                "bytes_forwarded=%lld packets_forwarded=%lld\n",
                s.peer_ip, s.peer_port, streamid_or_empty(s.streamid), close_reason,

@@ -5,6 +5,10 @@
 
 long long now_ms(void);
 
+/* Sleeps for about `ms`; a signal may end it early. Loops that wait on a clock sleep
+ * through this so a test can advance a fake clock instead of waiting. */
+void sleep_ms(int ms);
+
 /* True until SIGINT/SIGTERM (or relay_request_stop) asks the process to end.
  * Every loop in the relay polls this, so shutdown is cooperative. */
 int relay_running(void);

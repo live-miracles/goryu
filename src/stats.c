@@ -63,7 +63,7 @@ static void read_leg(leg_reading_t *leg, const SRT_SOCKGROUPDATA *member) {
     leg->have_counters = read_counters(&leg->counters, member->id);
 }
 
-/* Called with the tracker lock held, so in_sock cannot be closed meanwhile. */
+/* Called with the tracker lock held (see read_tracked), so in_sock cannot be closed. */
 static void read_input(stats_sample_t *sample, SRTSOCKET in_sock) {
     sample->have_in = read_counters(&sample->in, in_sock);
     if (!sample->is_group) return;
@@ -82,23 +82,34 @@ static void read_input(stats_sample_t *sample, SRTSOCKET in_sock) {
     }
 }
 
+typedef struct sampling {
+    stats_sample_t sample;
+    SRTSOCKET in_sock;
+    SRTSOCKET out_sock;
+} sampling_t;
+
+/* Runs under the tracker's lock (tracker_read_sockets), so the sockets it was told are
+ * tracked cannot be closed meanwhile. */
+static void read_tracked(int input_tracked, int output_tracked, void *ctx) {
+    sampling_t *sampling = ctx;
+    sampling->sample.can_read_in = input_tracked;
+    if (input_tracked) read_input(&sampling->sample, sampling->in_sock);
+    if (output_tracked) {
+        sampling->sample.have_out = read_counters(&sampling->sample.out, sampling->out_sock);
+    }
+}
+
 void update_stream_srt_counters(int slot, SRTSOCKET in_sock, SRTSOCKET out_sock, int force) {
     long long now = now_ms();
-    long long last = stream_state_last_stats_at_ms(slot);
-    if (last < 0) return; /* the session holds no stream */
-    if (!force && last > 0 && now - last < 1000) return;
+    if (!stream_state_sample_due(slot, now, force)) return;
 
-    stats_sample_t sample;
-    memset(&sample, 0, sizeof sample);
-    sample.taken_at_ms = now;
-    sample.is_group = in_sock != SRT_INVALID_SOCK && (in_sock & SRTGROUP_MASK);
+    sampling_t sampling;
+    memset(&sampling, 0, sizeof sampling);
+    sampling.in_sock = in_sock;
+    sampling.out_sock = out_sock;
+    sampling.sample.taken_at_ms = now;
+    sampling.sample.is_group = in_sock != SRT_INVALID_SOCK && (in_sock & SRTGROUP_MASK);
 
-    tracker_lock();
-    sample.can_read_in = tracker_input_is_locked(slot, in_sock);
-    int can_read_out = tracker_output_is_locked(slot, out_sock);
-    if (sample.can_read_in) read_input(&sample, in_sock);
-    if (can_read_out) sample.have_out = read_counters(&sample.out, out_sock);
-    tracker_unlock();
-
-    stream_state_apply_stats(slot, &sample);
+    tracker_read_sockets(slot, in_sock, out_sock, read_tracked, &sampling);
+    stream_state_apply_stats(slot, &sampling.sample);
 }

@@ -139,29 +139,28 @@ void set_last_errorf(const char *fmt, ...) __attribute__((format(printf, 1, 2)))
  * freely. */
 void set_stream_errorf(int slot, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
-typedef enum claim_result {
-    CLAIM_STREAM_OK,        /* the slot now holds the stream */
-    CLAIM_STREAM_NO_ID,     /* an empty streamid has no stream: nothing is claimed */
-    CLAIM_STREAM_IN_USE,    /* another session holds the streamid */
-    CLAIM_STREAM_SLOT_BUSY, /* the slot still holds an earlier stream, or is not a slot */
-} claim_result_t;
+/* A stream begins in a slot when its session claims the streamid and ends when the
+ * session releases the slot. Only tracker.c calls these two, because the tracker decides
+ * who holds a streamid (see tracker_acquire_stream), so the table never has an owner of
+ * its own to disagree with. */
 
-/* Claims `slot` (the session's own) for streamid. A slot that still holds a stream
- * is never overwritten: the session that held it must remove_stream_state() before
- * the slot is handed on. */
-claim_result_t claim_stream_state(const char *streamid, int slot);
-/* 0 and the age of the stream's last input packet, or -1 if streamid is unknown. */
-int stream_input_age_ms(const char *streamid, long long now, long long *age_ms);
-void remove_stream_state(int slot);
+/* Starts the stream in `slot`. Returns -1 and changes nothing for an empty streamid, a
+ * slot outside the table, or a slot that still holds a stream: that stream is never
+ * overwritten. */
+int stream_state_begin(int slot, const char *streamid);
+void stream_state_end(int slot);
+/* 0 and the age of the slot's last input packet, or -1 if the slot holds no stream. */
+int stream_state_input_age_ms(int slot, long long now, long long *age_ms);
 void set_stream_input_info(int slot, int bonded, const char *peer_ip, int peer_port);
 void set_stream_output_connected(int slot, int connected);
 void set_stream_retry_failures(int slot, int failures);
 void record_stream_input_progress(int slot);
 void record_stream_forward_progress(int slot, int bytes);
 
-/* When the slot's stream was last sampled (0 if never), or -1 when the slot holds no
- * stream, so a session without one skips sampling. */
-long long stream_state_last_stats_at_ms(int slot);
+/* Whether the session should read libsrt now: the slot holds a stream and it was
+ * last sampled at least STATS_SAMPLE_INTERVAL_MS ago (or never), or `force` is set. A
+ * session without a stream is never due, so it skips sampling. */
+int stream_state_sample_due(int slot, long long now, int force);
 void stream_state_apply_stats(int slot, const stats_sample_t *sample);
 
 /* Copies every state (MAX_ACTIVE_SESSIONS of them) and the process-level error. */

@@ -22,6 +22,9 @@ _Avoid_: channel, feed
 One accepted publisher connection in Goryu, from accept until it ends. A session with a streamid holds that stream; a session with an empty streamid still forwards but has no stream, and a rejected duplicate never gets one.
 _Avoid_: connection, client, worker
 
+**Slot**:
+A session's place in the session table, from accept until it releases it. The tracker keeps its sockets and the streamid it holds there, and the stream state keeps its telemetry at the same index. A slot holds at most one stream.
+
 **Input**:
 A session's side facing the publisher: one plain connection or one bonded group.
 

@@ -1,4 +1,4 @@
-/* The stream state table (src/stream_state.c): claiming a streamid for a session's
+/* The stream state table (src/stream_state.c): beginning a stream in a session's
  * slot, reusing a slot, what the setters do for a session that holds no stream, and the
  * log lines written when a reading changes the legs. libsrt is not involved: the log and
  * the clock are stubbed here. */
@@ -44,7 +44,7 @@ static const relay_stream_state_t *snapshot(int slot) {
 /* Empties the table: every slot that holds a stream is removed. */
 static void reset(void) {
     for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i)
-        remove_stream_state(i);
+        stream_state_end(i);
     set_last_errorf("%s", "");
     g_now = 1000;
     g_log_count = 0;
@@ -52,7 +52,7 @@ static void reset(void) {
 
 static void test_claiming_a_streamid(void) {
     reset();
-    CHECK(claim_stream_state("camera1/main", 4) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(4, "camera1/main") == 0);
     const relay_stream_state_t *st = snapshot(4);
     CHECK_STR(st->streamid, "camera1/main");
     CHECK(st->input_active && !st->output_connected);
@@ -62,49 +62,39 @@ static void test_claiming_a_streamid(void) {
 
 static void test_an_empty_streamid_has_no_stream(void) {
     reset();
-    CHECK(claim_stream_state("", 0) == CLAIM_STREAM_NO_ID);
-    CHECK(claim_stream_state(NULL, 0) == CLAIM_STREAM_NO_ID);
+    CHECK(stream_state_begin(0, "") == -1);
+    CHECK(stream_state_begin(0, NULL) == -1);
     CHECK(snapshot(0)->streamid[0] == '\0');
-}
-
-static void test_a_streamid_held_by_another_session_is_in_use(void) {
-    reset();
-    CHECK(claim_stream_state("camera1/main", 0) == CLAIM_STREAM_OK);
-    CHECK(claim_stream_state("camera1/main", 1) == CLAIM_STREAM_IN_USE);
-    CHECK(snapshot(1)->streamid[0] == '\0'); /* the loser holds nothing */
-    CHECK(claim_stream_state("camera1/backup", 1) == CLAIM_STREAM_OK);
-    CHECK_STR(snapshot(0)->streamid, "camera1/main");
-    CHECK_STR(snapshot(1)->streamid, "camera1/backup");
 }
 
 /* A slot still holding an earlier stream means the earlier session did not remove it
  * before the slot was handed on: that is refused, not overwritten. */
 static void test_a_slot_that_still_holds_a_stream_is_busy(void) {
     reset();
-    CHECK(claim_stream_state("first", 2) == CLAIM_STREAM_OK);
-    CHECK(claim_stream_state("second", 2) == CLAIM_STREAM_SLOT_BUSY);
+    CHECK(stream_state_begin(2, "first") == 0);
+    CHECK(stream_state_begin(2, "second") == -1);
     CHECK_STR(snapshot(2)->streamid, "first");
-    CHECK(claim_stream_state("second", -1) == CLAIM_STREAM_SLOT_BUSY);
-    CHECK(claim_stream_state("second", MAX_ACTIVE_SESSIONS) == CLAIM_STREAM_SLOT_BUSY);
+    CHECK(stream_state_begin(-1, "second") == -1);
+    CHECK(stream_state_begin(MAX_ACTIVE_SESSIONS, "second") == -1);
 }
 
 static void test_a_removed_slot_is_reusable_and_starts_clean(void) {
     reset();
-    CHECK(claim_stream_state("first", 7) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(7, "first") == 0);
     set_stream_retry_failures(7, 5);
     set_stream_errorf(7, "boom");
     record_stream_forward_progress(7, 1316);
     set_stream_output_connected(7, 1);
-    remove_stream_state(7);
+    stream_state_end(7);
     CHECK(snapshot(7)->streamid[0] == '\0');
 
-    CHECK(claim_stream_state("second", 7) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(7, "second") == 0);
     const relay_stream_state_t *st = snapshot(7);
     CHECK_STR(st->streamid, "second");
     CHECK(st->retry_failures == 0 && st->forwarded_bytes == 0 && st->forwarded_packets == 0);
     CHECK(!st->output_connected && st->last_error[0] == '\0');
     /* the old streamid is free again for anyone */
-    CHECK(claim_stream_state("first", 8) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(8, "first") == 0);
 }
 
 static void test_the_table_holds_every_slot(void) {
@@ -112,16 +102,16 @@ static void test_the_table_holds_every_slot(void) {
     char id[32];
     for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
         snprintf(id, sizeof id, "stream/%d", i);
-        CHECK(claim_stream_state(id, i) == CLAIM_STREAM_OK);
+        CHECK(stream_state_begin(i, id) == 0);
     }
-    CHECK(claim_stream_state("one/too/many", 0) == CLAIM_STREAM_SLOT_BUSY);
+    CHECK(stream_state_begin(0, "one/too/many") == -1);
     CHECK_STR(snapshot(MAX_ACTIVE_SESSIONS - 1)->streamid, "stream/255");
 }
 
 /* A session without a streamid, or one that lost the claim, calls the setters freely. */
 static void test_setters_ignore_a_slot_that_holds_no_stream(void) {
     reset();
-    CHECK(claim_stream_state("held", 1) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(1, "held") == 0);
     const int slots[] = {-1, 0, 2, MAX_ACTIVE_SESSIONS, 100000};
     for (size_t i = 0; i < sizeof slots / sizeof slots[0]; ++i) {
         int slot = slots[i];
@@ -147,7 +137,7 @@ static void test_setters_ignore_a_slot_that_holds_no_stream(void) {
 
 static void test_setters_write_the_claimed_slot(void) {
     reset();
-    CHECK(claim_stream_state("cam", 3) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(3, "cam") == 0);
     g_now = 5000;
     set_stream_errorf(3, "Relay output error to %s:%d", "10.0.0.1", 10080);
     set_stream_output_connected(3, 1);
@@ -170,7 +160,7 @@ static void test_setters_write_the_claimed_slot(void) {
 /* A bonded group has no single peer: its legs carry the addresses. */
 static void test_a_bonded_input_stores_no_peer(void) {
     reset();
-    CHECK(claim_stream_state("cam", 0) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(0, "cam") == 0);
     set_stream_input_info(0, 1, "10.0.1.20", 40000);
     const relay_stream_state_t *st = snapshot(0);
     CHECK(st->input_bonded);
@@ -180,20 +170,21 @@ static void test_a_bonded_input_stores_no_peer(void) {
 static void test_input_age_for_the_takeover_decision(void) {
     reset();
     long long age = -1;
-    CHECK(stream_input_age_ms("nobody", 9000, &age) == -1);
-    CHECK(stream_input_age_ms("", 9000, &age) == -1);
-    CHECK(claim_stream_state("cam", 0) == CLAIM_STREAM_OK); /* claimed at 1000 */
-    CHECK(stream_input_age_ms("cam", 4000, &age) == 0 && age == 3000);
+    CHECK(stream_state_input_age_ms(0, 9000, &age) == -1); /* no stream in the slot */
+    CHECK(stream_state_input_age_ms(-1, 9000, &age) == -1);
+    CHECK(stream_state_input_age_ms(MAX_ACTIVE_SESSIONS, 9000, &age) == -1);
+    CHECK(stream_state_begin(0, "cam") == 0); /* begun at 1000 */
+    CHECK(stream_state_input_age_ms(0, 4000, &age) == 0 && age == 3000);
     g_now = 3500;
     record_stream_input_progress(0);
-    CHECK(stream_input_age_ms("cam", 4000, &age) == 0 && age == 500);
-    remove_stream_state(0);
-    CHECK(stream_input_age_ms("cam", 4000, &age) == -1);
+    CHECK(stream_state_input_age_ms(0, 4000, &age) == 0 && age == 500);
+    stream_state_end(0);
+    CHECK(stream_state_input_age_ms(0, 4000, &age) == -1);
 }
 
 static void test_the_process_error_is_kept_apart_from_the_streams(void) {
     reset();
-    CHECK(claim_stream_state("cam", 0) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(0, "cam") == 0);
     set_last_errorf("status bind :%d failed", 8081);
     snapshot(0);
     CHECK_STR(g_snap_error, "status bind :8081 failed");
@@ -202,7 +193,7 @@ static void test_the_process_error_is_kept_apart_from_the_streams(void) {
 
 static void test_a_snapshot_is_a_copy(void) {
     reset();
-    CHECK(claim_stream_state("cam", 0) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(0, "cam") == 0);
     relay_stream_state_t *copy = malloc(MAX_ACTIVE_SESSIONS * sizeof *copy);
     char err[LAST_ERROR_MAX];
     stream_state_snapshot(copy, err, sizeof err);
@@ -213,19 +204,24 @@ static void test_a_snapshot_is_a_copy(void) {
     free(copy);
 }
 
-/* -1 means "this slot holds no stream", so the sampler can skip a session without one. */
-static void test_the_stats_clock(void) {
+/* A session reads libsrt at most once per STATS_SAMPLE_INTERVAL_MS, never when its slot
+ * holds no stream, and always when forced (at the end, for the final reading). */
+static void test_the_sampling_throttle(void) {
     reset();
-    CHECK(stream_state_last_stats_at_ms(0) == -1);
-    CHECK(stream_state_last_stats_at_ms(-1) == -1);
-    CHECK(stream_state_last_stats_at_ms(MAX_ACTIVE_SESSIONS) == -1);
-    CHECK(claim_stream_state("cam", 0) == CLAIM_STREAM_OK);
-    CHECK(stream_state_last_stats_at_ms(0) == 0);
+    CHECK(!stream_state_sample_due(0, 5000, 0)); /* no stream: never due, even forced */
+    CHECK(!stream_state_sample_due(0, 5000, 1));
+    CHECK(!stream_state_sample_due(-1, 5000, 1));
+    CHECK(!stream_state_sample_due(MAX_ACTIVE_SESSIONS, 5000, 1));
+    CHECK(stream_state_begin(0, "cam") == 0);
+    CHECK(stream_state_sample_due(0, 5000, 0)); /* never sampled: due */
     stats_sample_t s;
     memset(&s, 0, sizeof s);
     s.taken_at_ms = 4321;
     stream_state_apply_stats(0, &s);
-    CHECK(stream_state_last_stats_at_ms(0) == 4321);
+    CHECK(!stream_state_sample_due(0, 4321, 0));
+    CHECK(!stream_state_sample_due(0, 4321 + STATS_SAMPLE_INTERVAL_MS - 1, 0));
+    CHECK(stream_state_sample_due(0, 4321 + STATS_SAMPLE_INTERVAL_MS, 0));
+    CHECK(stream_state_sample_due(0, 4321, 1)); /* forced */
     /* a reading for a slot without a stream is dropped */
     stream_state_apply_stats(5, &s);
     CHECK(snapshot(5)->last_stats_at_ms == 0);
@@ -234,7 +230,7 @@ static void test_the_stats_clock(void) {
 /* The wrapper writes the leg log lines the docs describe, with the stream's id. */
 static void test_leg_changes_are_logged_with_the_streamid(void) {
     reset();
-    CHECK(claim_stream_state("camera1/main", 0) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(0, "camera1/main") == 0);
     stats_sample_t s;
     memset(&s, 0, sizeof s);
     s.is_group = 1;
@@ -267,7 +263,7 @@ static void test_leg_changes_are_logged_with_the_streamid(void) {
 /* A flapping leg: at most LEG_LOG_MAX_PER_WINDOW lines, then one summary. */
 static void test_a_flapping_leg_logs_a_bounded_number_of_lines(void) {
     reset();
-    CHECK(claim_stream_state("cam", 0) == CLAIM_STREAM_OK);
+    CHECK(stream_state_begin(0, "cam") == 0);
     stats_sample_t up, down;
     memset(&up, 0, sizeof up);
     up.is_group = 1;
@@ -300,7 +296,6 @@ int main(void) {
     if (!g_snap) return 2;
     test_claiming_a_streamid();
     test_an_empty_streamid_has_no_stream();
-    test_a_streamid_held_by_another_session_is_in_use();
     test_a_slot_that_still_holds_a_stream_is_busy();
     test_a_removed_slot_is_reusable_and_starts_clean();
     test_the_table_holds_every_slot();
@@ -310,7 +305,7 @@ int main(void) {
     test_input_age_for_the_takeover_decision();
     test_the_process_error_is_kept_apart_from_the_streams();
     test_a_snapshot_is_a_copy();
-    test_the_stats_clock();
+    test_the_sampling_throttle();
     test_leg_changes_are_logged_with_the_streamid();
     test_a_flapping_leg_logs_a_bounded_number_of_lines();
     free(g_snap);

@@ -43,53 +43,36 @@ void set_stream_errorf(int slot, const char *fmt, ...) {
     pthread_mutex_unlock(&g_streams_mu);
 }
 
-claim_result_t claim_stream_state(const char *streamid, int slot) {
-    if (!streamid || !streamid[0]) return CLAIM_STREAM_NO_ID;
-    claim_result_t result = CLAIM_STREAM_OK;
+int stream_state_begin(int slot, const char *streamid) {
+    if (!streamid || !streamid[0]) return -1;
+    int result = -1;
     pthread_mutex_lock(&g_streams_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (g_streams[i].streamid[0] && strcmp(g_streams[i].streamid, streamid) == 0) {
-            result = CLAIM_STREAM_IN_USE;
-            break;
-        }
-    }
-    if (result == CLAIM_STREAM_OK) {
-        if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS || g_streams[slot].streamid[0]) {
-            result = CLAIM_STREAM_SLOT_BUSY;
-        } else {
-            memset(&g_streams[slot], 0, sizeof g_streams[slot]);
-            snprintf(g_streams[slot].streamid, sizeof g_streams[slot].streamid, "%s", streamid);
-            g_streams[slot].input_active = 1;
-            g_streams[slot].last_input_packet_at_ms = now_ms();
-        }
+    if (slot >= 0 && slot < MAX_ACTIVE_SESSIONS && !g_streams[slot].streamid[0]) {
+        memset(&g_streams[slot], 0, sizeof g_streams[slot]);
+        snprintf(g_streams[slot].streamid, sizeof g_streams[slot].streamid, "%s", streamid);
+        g_streams[slot].input_active = 1;
+        g_streams[slot].last_input_packet_at_ms = now_ms();
+        result = 0;
     }
     pthread_mutex_unlock(&g_streams_mu);
     return result;
 }
 
-int stream_input_age_ms(const char *streamid, long long now, long long *age_ms) {
-    if (!streamid || !streamid[0]) return -1;
-
-    int found = 0;
-    long long last_input_at = 0;
-
+int stream_state_input_age_ms(int slot, long long now, long long *age_ms) {
+    int result = -1;
     pthread_mutex_lock(&g_streams_mu);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; ++i) {
-        if (!g_streams[i].streamid[0]) continue;
-        if (strcmp(g_streams[i].streamid, streamid) != 0) continue;
-        found = 1;
-        last_input_at = g_streams[i].last_input_packet_at_ms;
-        break;
+    const relay_stream_state_t *st = stream_in(slot);
+    if (st) {
+        long long last_input_at = st->last_input_packet_at_ms;
+        if (last_input_at <= 0) last_input_at = now;
+        if (age_ms) *age_ms = now - last_input_at;
+        result = 0;
     }
     pthread_mutex_unlock(&g_streams_mu);
-
-    if (!found) return -1;
-    if (last_input_at <= 0) last_input_at = now;
-    if (age_ms) *age_ms = now - last_input_at;
-    return 0;
+    return result;
 }
 
-void remove_stream_state(int slot) {
+void stream_state_end(int slot) {
     if (slot < 0 || slot >= MAX_ACTIVE_SESSIONS) return;
     pthread_mutex_lock(&g_streams_mu);
     memset(&g_streams[slot], 0, sizeof g_streams[slot]);
@@ -119,7 +102,7 @@ void set_stream_output_connected(int slot, int connected) {
     // Deliberately leave last_error/last_error_at_ms in place on reconnect: a
     // status poller can easily land after a fast reconnect already cleared it,
     // hiding a real failure that just happened. last_error is superseded by a
-    // newer set_stream_errorf() call, or reset to empty by claim_stream_state()
+    // newer set_stream_errorf() call, or reset to empty by stream_state_begin()
     // when the slot is later reused for a fresh session.
     // retry_failures is not reset here: a connect that succeeds does not make the
     // downstream healthy (see OUTPUT_HEALTHY_MS in backoff.h).
@@ -152,12 +135,13 @@ void record_stream_forward_progress(int slot, int bytes) {
     pthread_mutex_unlock(&g_streams_mu);
 }
 
-long long stream_state_last_stats_at_ms(int slot) {
+int stream_state_sample_due(int slot, long long now, int force) {
     pthread_mutex_lock(&g_streams_mu);
-    relay_stream_state_t *st = stream_in(slot);
-    long long last = st ? st->last_stats_at_ms : -1;
+    const relay_stream_state_t *st = stream_in(slot);
+    int due = st && (force || st->last_stats_at_ms == 0 ||
+                     now - st->last_stats_at_ms >= STATS_SAMPLE_INTERVAL_MS);
     pthread_mutex_unlock(&g_streams_mu);
-    return last;
+    return due;
 }
 
 void stream_state_snapshot(relay_stream_state_t *states, char *last_error, size_t last_error_sz) {
