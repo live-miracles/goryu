@@ -1,0 +1,3 @@
+# The status API, config keys and release asset are a contract with Bunryu
+
+[Bunryu](https://github.com/live-miracles/bunryu) pins a Goryu release, generates `goryu.json` and mirrors the status API's field names and `null` rules in its own code, and this repository cannot see that code. So the release asset name (`goryu-linux-x86_64.tar.gz` and `checksums.sha256`), the `goryu.json` keys, the two-URI command line and the status API shape are interfaces. Adding a status field is safe; renaming or removing one, or changing its meaning or nullability, is a breaking change that needs a major version and a note to the Bunryu side.

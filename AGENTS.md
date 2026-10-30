@@ -11,7 +11,11 @@ forwards it to a downstream SRT server under the same `streamid`.
 It is a standalone project, and it is also the bonded-SRT ingress of
 [Bunryu](https://github.com/live-miracles/bunryu), which pins a release,
 generates `goryu.json` and polls the status API. Read `docs/` before changing
-behavior; `docs/4-reference/2-architecture.md` is the shortest tour.
+behavior; `docs/4-reference/2-architecture.md` is the shortest tour. Use the terms
+in `GLOSSARY.md` (a *session* holds a *stream*; they are not the same thing), and read
+the decision records in `docs/adr/` that touch the area before you change it: each
+names the alternatives that were rejected and why. A new decision that is hard to
+reverse, surprising without context and a real trade-off gets the next number there.
 
 ## Compatibility contract
 
@@ -23,9 +27,8 @@ Bunryu is a consumer you cannot see from this repo, so these are interfaces:
 - **Status API shape** (`docs/4-reference/1-status-api.md`). Bunryu's
   `src/services/srtRelay.ts` mirrors the field names and the `null` rules (for
   example, a bonded input leaves `bandwidthMbps`..`rcvBufMs` null and a failed
-  leg disappears from `legs[]`). Adding a field is safe; renaming, removing or
-  changing the meaning or nullability of one is a breaking change that needs a
-  major version and a note to the Bunryu side.
+  leg disappears from `legs[]`). Adding a field is safe; anything else is a
+  breaking change ([ADR 0003](docs/adr/0003-bunryu-compatibility-contract.md)).
 - **The `goryu.json` keys** (six required, and the optional `output_passphrase`) and the
   two-URI command line.
 
@@ -40,8 +43,7 @@ networks, a dead or rejecting downstream, and misbehaving encoders.
   wait is 5 s, the session table has 256 entries). Don't add an unbounded loop,
   a tight retry or a growing allocation; no tight polling.
 - The status thread never calls libsrt; session threads sample and the status
-  thread copies. Keep that, so polling can't slow forwarding or deadlock on a
-  libsrt lock.
+  thread copies ([ADR 0002](docs/adr/0002-status-thread-never-calls-libsrt.md)).
 - The status port stays bound to `127.0.0.1`. It reports encoder addresses.
 - Shutdown must close sockets and join session threads (`on_signal`,
   `close_active_session_sockets`, `wait_for_session_threads`); a change to
@@ -56,9 +58,8 @@ Every failure or recovery path should leave a line that explains it afterwards.
 - Use `relay_logf` (timestamped); keep the existing `key=value` style
   (`streamid=`, `peer=`, `reason=`, `duration_ms=`).
 - Bound anything that can repeat per packet or per failure. libsrt's own log is
-  capped at 20 lines/s process-wide for a recorded reason (a 16-minute burst
-  starved journald on a small host; see
-  [Reliability](docs/3-operations/1-reliability.md#log-volume)). Don't raise
+  capped at 20 lines/s process-wide
+  ([ADR 0007](docs/adr/0007-cap-libsrt-log-output-process-wide.md)). Don't raise
   libsrt's log level or add a per-packet log.
 - Don't swallow an error: either log it or put it in `lastError`
   (process-level) or the stream's `lastError`, and say why it is tolerated.
@@ -105,7 +106,8 @@ Navigation only; correct an entry when a change makes it stale.
   (tag must equal `VERSION`; builds, attests, publishes the release, then the Docker image).
   `.github/release-notes/<tag>.md` holds each release's hand-written notes.
 - `docs/` - numbered section folders of numbered pages, indexed by
-  `docs/README.md`; `README.md` is the short pitch and quick start.
+  `docs/README.md`; `README.md` is the short pitch and quick start. `docs/adr/` holds
+  the numbered decision records, and `GLOSSARY.md` at the root the domain terms.
 
 The code is C, built with `gcc -O2 -Wall -Wextra` (`scripts/goryu.Dockerfile`); keep
 it warning-free. libsrt is C++ inside but `srt.h` is a plain C API, which is all
