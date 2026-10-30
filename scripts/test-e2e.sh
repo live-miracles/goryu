@@ -175,7 +175,7 @@ build_test_tool() {
     local name="$1" source="$REPO_DIR/tests/e2e/${1//-/_}.c"
     [[ -x "$REPO_DIR/objs/$name" && "$REPO_DIR/objs/$name" -nt "$source" ]] && return 0
     command -v docker >/dev/null 2>&1 || { echo "  (docker is needed to build $name)"; return 1; }
-    local image="goryu-dev:${SRT_TAG:-v1.5.6}"
+    local image="goryu-dev:${SRT_TAG:-$(sed -n 's/^ARG SRT_TAG=//p' "$REPO_DIR/scripts/goryu.Dockerfile")}"
     docker image inspect "$image" >/dev/null 2>&1 || { echo "  (image $image is missing: run scripts/build-local.sh)"; return 1; }
     mkdir -p "$REPO_DIR/objs"
     docker run --rm --user "$(id -u):$(id -g)" -v "$REPO_DIR":/w -w /w "$image" \

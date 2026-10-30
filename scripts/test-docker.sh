@@ -50,6 +50,15 @@ wait_for() { # wait_for <seconds> <description> <command...>
     fail "timed out waiting for $what"
 }
 
+# The runtime image must use the base the release is built on, because the archive links
+# against its glibc. The digest is written in both Dockerfiles (the image is built from
+# docker/ alone, so it cannot read the other); CI and the release run this, so the two
+# cannot drift apart unnoticed.
+build_base="$(sed -n 's/^FROM \(ubuntu:[^ ]*\).*/\1/p' "$REPO_DIR/scripts/goryu.Dockerfile")"
+image_base="$(sed -n 's/^ARG BASE=//p' "$REPO_DIR/docker/Dockerfile")"
+[[ -n "$build_base" && "$build_base" == "$image_base" ]] ||
+    fail "docker/Dockerfile's BASE ($image_base) is not the base scripts/goryu.Dockerfile builds on ($build_base)"
+
 for port in "$IN_PORT" "$OUT_PORT" "$STATUS_PORT"; do
     if ss -H -ltun | awk '{print $5}' | grep -q ":$port$"; then
         fail "port $port is in use; set DOCKER_TEST_PORT"

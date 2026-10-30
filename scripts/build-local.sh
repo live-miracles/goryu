@@ -2,7 +2,8 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SRT_TAG="${SRT_TAG:-v1.5.6}"
+# The libsrt tag is pinned once, in the Dockerfile; SRT_TAG overrides it for one build.
+SRT_TAG="${SRT_TAG:-$(sed -n 's/^ARG SRT_TAG=//p' "$REPO_DIR/scripts/goryu.Dockerfile")}"
 IMAGE_TAG="goryu-dev:${SRT_TAG}"
 CONTAINER_NAME="goryu-dev-$$"
 OUT_BIN="${GORYU_PATH:-$REPO_DIR/objs/goryu}"

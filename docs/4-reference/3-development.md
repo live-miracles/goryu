@@ -148,14 +148,19 @@ changing what ships. To update either one:
 - Base image: `docker buildx imagetools inspect ubuntu:22.04`, then copy the
   top-level `Digest:` into the `FROM` line.
 - libsrt: `git ls-remote https://github.com/Haivision/srt 'refs/tags/vX.Y.Z'`,
-  then set `SRT_TAG` and `SRT_COMMIT` in the Dockerfile and `SRT_TAG` in
-  `scripts/build-local.sh`. To try another version locally without editing
-  files, set both `SRT_TAG` and `SRT_COMMIT` in the environment.
+  then set `SRT_TAG` and `SRT_COMMIT` in the Dockerfile. To try another version
+  locally without editing files, set both `SRT_TAG` and `SRT_COMMIT` in the
+  environment.
+
+The libsrt pin is written once: `scripts/build-local.sh`, `scripts/test-e2e.sh` and
+`docker/demo-sender/Dockerfile` read the tag (and the demo sender the commit) out of
+`scripts/goryu.Dockerfile`, so they follow without an edit.
 
 `docker/Dockerfile` repeats the base image digest (it must match the one the release
 is built on, because the archive links against that glibc), so change both together.
-`docker/demo-sender/Dockerfile` reads the libsrt tag and commit out of
-`scripts/goryu.Dockerfile`, so it follows without an edit.
+It is a copy because that image is built from `docker/` alone, which cannot read the
+other file; `scripts/test-docker.sh` fails when the two differ, and CI and the release
+run it.
 
 Projects that pin a Goryu release (such as Bunryu's installer and Docker image)
 download `goryu-linux-x86_64.tar.gz` from the release, so the asset name is part
