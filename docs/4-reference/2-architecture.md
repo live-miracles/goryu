@@ -22,17 +22,22 @@ small modules listed [below](#modules). It has three kinds of thread.
 | `goryu.c` | Entry point: arguments and config, the listener, the accept loop, shutdown order |
 | `session.c` | One session thread: streamid, [duplicate publishers](../3-operations/1-reliability.md#duplicate-publishers), downstream connect and [retry](../3-operations/1-reliability.md#downstream-retry), the read/send loop |
 | `tracker.c` | The sockets of every live session, so one thread can close another's and the sampler never reads a closed socket |
-| `stream_state.c` | The shared, mutex-protected telemetry per stream, plus the process-level `lastError` |
-| `stats.c` | Reads libsrt's counters for a session into a sample that `stream_state.c` applies |
-| `status_api.c`, `json_out.c` | The loopback HTTP thread and the JSON writers |
+| `stream_state.c` | The shared, mutex-protected telemetry per stream, at the session's slot; a stream's claim on its streamid; the process-level `lastError` |
+| `stats.c` | The libsrt side of telemetry: reads a session's counters into a plain sample and applies no rule |
+| `telemetry.c` | The rules that turn a sample into what the status API reports: which values are valid, totals only moving forward, a bonded group's latency, legs joining and leaving. Pure |
+| `status_json.c`, `json_out.c` | The status JSON written from a snapshot it is handed (pure), and the JSON writers |
+| `status_api.c` | The loopback HTTP thread around them |
 | `relay_config.c` | `goryu.json` (a strict scanner for a flat object), URI and query parsing, passphrase rules, URI redaction |
 | `srt_opts.c` | Applies SRT options from a query and reports a refused one |
 | `timed_send.c` | Sends a buffer on a socket with one total deadline; the status thread uses it so a client that stops reading cannot hold it |
 | `ratelimit.c` | A fixed window that lets a few events through and counts the rest (used for the leg join/leave log lines) |
 | `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays and one session's retry state |
 
-The tracker and the stream state use the same slot index for a session. Both are
-guarded by their own mutex and are never held at the same time, except that the
+A session has one slot, and it indexes both tables: the tracker's (its sockets) and
+the stream state's (its telemetry). A stream is only ever stored in its own session's
+slot, and a session with an empty streamid holds no stream, so the stream-state calls
+ignore it. A session removes its stream before it releases the slot. The two tables
+are guarded by their own mutex and are never held at the same time, except that the
 stats sampler holds the tracker's while it calls libsrt.
 
 ## Listener
@@ -82,9 +87,11 @@ shared session state
 ```
 
 A per-session sampler (`update_stream_srt_counters`, rate-limited to once per
-second per session) reads libsrt's counters under a lock and writes them into
-the shared state. It runs on the session thread itself, so the status thread
-never touches libsrt. Group-level `srt_bstats` leaves several fields empty for a
+second per session) reads libsrt's counters under a lock into a plain sample.
+`telemetry_apply` then turns the sample into the stream's state under the stream
+state's lock, and the status thread copies that state and writes the JSON from the
+copy. The sampler runs on the session thread itself, so the status thread
+never touches libsrt, and the rules in the middle need no libsrt to be tested. Group-level `srt_bstats` leaves several fields empty for a
 bonded group, which is why the status API reports some values per leg only and
 derives the input latency from the legs; see the
 [field notes](1-status-api.md).

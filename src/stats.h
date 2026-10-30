@@ -6,10 +6,8 @@
 /* Reads libsrt's counters for one session (input socket or group, its member
  * legs, and the downstream socket) and stores them in the stream's state. It runs
  * on the session thread, at most once per second unless force is set, so the
- * status thread never touches libsrt. slot is the stream-state slot (-1 for a
- * stream without a streamid: nothing to update) and tracker_slot the session's
- * tracker slot. */
-void update_stream_srt_counters(int slot, int tracker_slot, SRTSOCKET in_sock, SRTSOCKET out_sock,
-                                int force);
+ * status thread never touches libsrt. slot is the session's slot; a session that
+ * holds no stream (an empty streamid) has nothing to update and returns at once. */
+void update_stream_srt_counters(int slot, SRTSOCKET in_sock, SRTSOCKET out_sock, int force);
 
 #endif

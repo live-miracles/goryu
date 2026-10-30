@@ -46,9 +46,9 @@ networks, a dead or rejecting downstream, and misbehaving encoders.
   thread copies ([ADR 0002](docs/adr/0002-status-thread-never-calls-libsrt.md)).
 - The status port stays bound to `127.0.0.1`. It reports encoder addresses and has no
   authentication ([ADR 0013](docs/adr/0013-status-api-is-loopback-only-and-unauthenticated.md)).
-- Shutdown must close sockets and join session threads (`on_signal`,
-  `close_active_session_sockets`, `wait_for_session_threads`); a change to
-  session lifecycle is high-risk.
+- Shutdown must close sockets and join session threads (`on_signal` in
+  `runtime.c`, `tracker_close_all`, `tracker_wait_all`); a change to session
+  lifecycle is high-risk.
 - Prefer small, reversible changes. No new dependencies; the build is one
   `gcc` line against libsrt, libssl and libcrypto.
 
@@ -81,12 +81,18 @@ Navigation only; correct an entry when a change makes it stale.
   `session_spawn` starts it.
 - `src/tracker.c` - the sockets of every live session (slot table, `tracker_*`);
   how one thread closes another's and how shutdown waits for all of them.
-- `src/stream_state.c` - the mutex-protected per-stream telemetry (same slot
-  index as the tracker), the process `lastError`, and `stream_state_snapshot`.
-- `src/stats.c` - reads libsrt's counters under the tracker lock into a
-  `stats_sample_t`; `stream_state_apply_stats` stores it.
-- `src/status_api.c`, `src/json_out.c` - the loopback HTTP thread and status JSON;
-  the JSON writers (unit-tested).
+- `src/stream_state.c` - the mutex-protected per-stream telemetry, at the session's
+  slot (the same index as the tracker's); a stream's claim on its streamid; the
+  process `lastError`; `stream_state_snapshot`. Its functions ignore a slot that holds
+  no stream. Unit-tested with the log and clock stubbed.
+- `src/stats.c` - the libsrt side of telemetry: reads counters under the tracker lock
+  into a plain `stats_sample_t` and applies no rule.
+- `src/telemetry.c` - the rules that turn a sample into what the status API reports
+  (which values are valid, totals only move forward, group latency, bonded leg
+  join/leave); pure and unit-tested ([ADR 0014](docs/adr/0014-telemetry-rules-are-pure-and-libsrt-is-read-in-one-place.md)).
+- `src/status_json.c`, `src/json_out.c` - the status JSON written from a snapshot it is
+  handed (pure; the Bunryu null rules are pinned by `tests/unit/test_status_json.c`),
+  and the JSON writers. `src/status_api.c` - the loopback HTTP thread around them.
 - `src/timed_send.c` - send a buffer with one total deadline (the status reply;
   unit-tested over a socketpair).
 - `src/relay_config.c/.h` - `goryu.json` parsing (a strict scanner, [ADR 0012](docs/adr/0012-goryu-json-is-read-by-a-strict-scanner.md)), the passphrase rule,
@@ -136,7 +142,7 @@ operational guarantee, update every page that describes it in the same change.
 Search `docs/` and `README.md` for the name of the thing.
 
 - **Status API fields** live in `docs/4-reference/1-status-api.md`; keep its
-  example and field notes equal to `write_status_response`.
+  example and field notes equal to `status_json_write`.
 - **Retry, takeover, logging and limits** live in
   `docs/3-operations/1-reliability.md` and the Limits table in
   `docs/1-getting-started/1-introduction.md`.
@@ -184,7 +190,8 @@ Look at the newest file in that folder for the shape.
 Three layers, all run by CI (details in `docs/4-reference/3-development.md`):
 
 - `bash scripts/test-unit.sh` - no Docker, a few seconds. Pure modules: config and
-  URI parsing, passphrase rules, redaction, backoff, JSON writers, the deadline-bound send.
+  URI parsing, passphrase rules, redaction, backoff, JSON writers, the deadline-bound send, the telemetry rules, the status JSON
+  (every null rule), the stream state table.
 - `bash scripts/smoke-test.sh` (needs Docker) - rebuilds, starts the binary from
   `goryu.json`, checks the usage failure, the status endpoint and the pid.
 - `bash scripts/test-e2e.sh` (needs ffmpeg, jq, Docker; about three minutes) - the

@@ -3,20 +3,29 @@
 
 #include <arpa/inet.h>
 
-#include <srt/srt.h>
-
 #include "ratelimit.h"
 #include "relay_common.h"
 
 /* The relay's shared, mutex-protected telemetry: one relay_stream_state_t per
  * stream, in the slot that the tracker also uses for the session's sockets.
  * Session threads write it; the status thread only reads a snapshot, so it never
- * calls libsrt. */
+ * calls libsrt. These types do not mention libsrt, so the rules in telemetry.c and
+ * the writer in status_json.c can be unit-tested without it. */
+
+/* What libsrt says about a leg of a bonded group. Broken legs are not reported at
+ * all (a failed leg disappears from the status API's legs[]), so there is no
+ * state for them. */
+typedef enum leg_member_state {
+    LEG_MEMBER_UNKNOWN,
+    LEG_MEMBER_PENDING,
+    LEG_MEMBER_IDLE,
+    LEG_MEMBER_RUNNING,
+} leg_member_state_t;
 
 typedef struct relay_leg_state {
     char ip[INET6_ADDRSTRLEN];
     int port;
-    int member_state;
+    leg_member_state_t member_state;
     int stats_valid;
     long long recv_packets_total;
     long long recv_unique_packets_total;
@@ -106,20 +115,52 @@ typedef struct relay_stream_state {
     long long last_error_at_ms;
 } relay_stream_state_t;
 
-/* One reading of libsrt's counters for a session, taken by stats.c and applied
- * to the stream's state in one step. */
+/* One socket's SRT counters as libsrt reports them, copied by stats.c without
+ * interpretation. Which of them can be trusted, and which are left out of the status
+ * API, is decided by telemetry.c. Only the fields the relay uses are here. */
+typedef struct srt_counters {
+    int tsbpd_delay_ms; /* msRcvTsbPdDelay: the negotiated latency */
+    double rtt_ms;
+    long long recv_total;
+    long long recv_unique_total;
+    int recv_loss_total;
+    int recv_drop_total;
+    int recv_retrans_total;
+    double bandwidth_mbps;
+    double recv_rate_mbps;
+    long long belated_total;
+    double belated_avg_ms;
+    int undecrypt_total;
+    int reorder_distance;
+    int rcv_buf_ms;
+    long long sent_total;
+    int send_loss_total;
+    int send_drop_total;
+    int send_retrans_total;
+    double send_rate_mbps;
+    int snd_buf_ms;
+} srt_counters_t;
+
+/* One member of a bonded group, as read from libsrt. */
+typedef struct leg_reading {
+    char ip[INET6_ADDRSTRLEN];
+    int port;
+    leg_member_state_t state;
+    int have_counters; /* reading the member's own statistics worked */
+    srt_counters_t counters;
+} leg_reading_t;
+
+/* One reading of libsrt for a session, taken by stats.c and applied to the stream's
+ * state in one step by telemetry_apply(). */
 typedef struct stats_sample {
     long long taken_at_ms;
     int can_read_in; /* the input socket was still the tracked one */
     int is_group;    /* the input is a bonded group */
     int have_in;
-    SRT_TRACEBSTATS in_stats;
-    int in_belated_avg_valid;
-    int have_in_latency;
-    int in_latency_ms;
+    srt_counters_t in;
     int have_out;
-    SRT_TRACEBSTATS out_stats;
-    relay_leg_state_t legs[MAX_GROUP_MEMBERS];
+    srt_counters_t out;
+    leg_reading_t legs[MAX_GROUP_MEMBERS];
     int leg_count;
     /* srt_group_data succeeded, so legs[] is the real set (possibly empty) and
      * not just "nothing could be read". */
@@ -129,16 +170,23 @@ typedef struct stats_sample {
 /* The most recent process-level error, shown as lastError in the status API. */
 void set_last_errorf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
-/* Per-stream state. Every function ignores a slot outside the table, so a
- * session without a streamid (slot -1) can call them freely. */
+/* Per-stream state, indexed by the session's slot (the same index the tracker uses for
+ * its sockets). Every function ignores a slot that is outside the table or holds no
+ * stream, so a session that has no streamid, or that lost the claim, can call them
+ * freely. */
 void set_stream_errorf(int slot, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
-/* What claim_stream_state returns when another session already holds the streamid. */
-#define CLAIM_STREAM_IN_USE (-2)
+typedef enum claim_result {
+    CLAIM_STREAM_OK,        /* the slot now holds the stream */
+    CLAIM_STREAM_NO_ID,     /* an empty streamid has no stream: nothing is claimed */
+    CLAIM_STREAM_IN_USE,    /* another session holds the streamid */
+    CLAIM_STREAM_SLOT_BUSY, /* the slot still holds an earlier stream, or is not a slot */
+} claim_result_t;
 
-/* Claims the slot for streamid. Returns the slot, -1 for an empty streamid or
- * when preferred_slot is taken, or CLAIM_STREAM_IN_USE. */
-int claim_stream_state(const char *streamid, int preferred_slot);
+/* Claims `slot` (the session's own) for streamid. A slot that still holds a stream
+ * is never overwritten: the session that held it must remove_stream_state() before
+ * the slot is handed on. */
+claim_result_t claim_stream_state(const char *streamid, int slot);
 /* 0 and the age of the stream's last input packet, or -1 if streamid is unknown. */
 int stream_input_age_ms(const char *streamid, long long now, long long *age_ms);
 void remove_stream_state(int slot);
@@ -148,6 +196,8 @@ void set_stream_retry_failures(int slot, int failures);
 void record_stream_input_progress(int slot);
 void record_stream_forward_progress(int slot, int bytes);
 
+/* When the slot's stream was last sampled (0 if never), or -1 when the slot holds no
+ * stream, so a session without one skips sampling. */
 long long stream_state_last_stats_at_ms(int slot);
 void stream_state_apply_stats(int slot, const stats_sample_t *sample);
 

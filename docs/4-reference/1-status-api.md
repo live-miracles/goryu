@@ -2,7 +2,8 @@
 
 Goryu serves a JSON snapshot of every active or recently active stream on
 `127.0.0.1:<status_port>`. The port is loopback only and is not reachable from
-other hosts. Any request returns the snapshot:
+other hosts. Any request returns the snapshot. The field names, their order and when each
+is `null` are pinned by `tests/unit/test_status_json.c`, because Bunryu mirrors them:
 
 ```bash
 curl http://127.0.0.1:8081/status

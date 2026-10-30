@@ -166,6 +166,11 @@ void tracker_unregister(int slot) {
     pthread_mutex_unlock(&g_tracker_mu);
 }
 
+void tracker_release(int slot, SRTSOCKET input) {
+    if (tracker_take_input(slot, input) != SRT_INVALID_SOCK) srt_close(input);
+    tracker_unregister(slot);
+}
+
 void tracker_close_all(void) {
     SRTSOCKET sockets[MAX_ACTIVE_SESSIONS * 2];
     int count = 0;

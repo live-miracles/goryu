@@ -31,7 +31,9 @@ a `streamStates` field and the pid of the process it started.
 
 - **Unit tests** (`tests/unit/`) cover the code that needs no libsrt: config and
   URI parsing, the passphrase rules and redaction, the retry backoff, the JSON
-  writers and the deadline-bound send (over a socketpair). Each test is built with the release's `gcc -Wall -Wextra` plus `-Werror`,
+  writers, the deadline-bound send (over a socketpair), the telemetry rules (a libsrt
+  reading is a struct), the status JSON with every null rule, and the stream state
+  table (its log and clock stubbed). Each test is built with the release's `gcc -Wall -Wextra` plus `-Werror`,
   under AddressSanitizer and UndefinedBehaviorSanitizer. A new check
   goes in the matching `tests/unit/test_*.c`.
 - **End-to-end tests** (`scripts/test-e2e.sh`) start the relay, a downstream and

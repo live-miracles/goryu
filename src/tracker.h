@@ -21,6 +21,11 @@ void tracker_unregister(int slot);
 void tracker_set_streamid(int slot, const char *streamid);
 void tracker_set_output_socket(int slot, SRTSOCKET sock);
 
+/* Ends a session's hold on its slot, last of all: closes the input socket if it is
+ * still the tracked one (a takeover or shutdown may have closed it already) and frees
+ * the slot. */
+void tracker_release(int slot, SRTSOCKET input);
+
 /* Return `expected` (and stop tracking it) if it is still the slot's socket,
  * otherwise SRT_INVALID_SOCK. The caller closes what it gets. */
 SRTSOCKET tracker_take_input(int slot, SRTSOCKET expected);

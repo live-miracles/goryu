@@ -35,7 +35,7 @@
 typedef struct session_args {
     SRTSOCKET conn;
     const output_target_t *target;
-    int tracker_slot;
+    int slot;
     char peer_ip[INET6_ADDRSTRLEN];
     int peer_port;
 } session_args_t;
@@ -44,8 +44,9 @@ typedef struct session_args {
  * same handful of values each time. */
 typedef struct session {
     const output_target_t *target;
-    int tracker_slot; /* this session's sockets, in tracker.c */
-    int state_slot;   /* its telemetry, in stream_state.c; -1 for an empty streamid */
+    /* This session's slot: its sockets are in the tracker's table and, once it holds a
+     * stream, its telemetry is at the same index in the stream state's. */
+    int slot;
     char streamid[1024];
     char peer_ip[INET6_ADDRSTRLEN];
     int peer_port;
@@ -107,8 +108,8 @@ static void report_connect_failure(const session_t *s, SRTSOCKET srt_out, char *
                streamid_or_empty(s->streamid), error_text, log_suffix);
 }
 
-static void close_output(int tracker_slot, SRTSOCKET srt_out) {
-    if (tracker_take_output(tracker_slot, srt_out) != SRT_INVALID_SOCK) {
+static void close_output(int slot, SRTSOCKET srt_out) {
+    if (tracker_take_output(slot, srt_out) != SRT_INVALID_SOCK) {
         srt_close(srt_out);
     }
 }
@@ -125,7 +126,7 @@ static SRTSOCKET connect_srt_output(const session_t *s, char *error_out, size_t 
         relay_logf("srt_create_socket(out): %s\n", srt_getlasterror_str());
         return SRT_INVALID_SOCK;
     }
-    tracker_set_output_socket(s->tracker_slot, srt_out);
+    tracker_set_output_socket(s->slot, srt_out);
 
     SRT_TRANSTYPE tt = SRTT_LIVE;
     srt_setsockflag(srt_out, SRTO_TRANSTYPE, &tt, sizeof tt);
@@ -136,7 +137,7 @@ static SRTSOCKET connect_srt_output(const session_t *s, char *error_out, size_t 
         }
         set_last_errorf("output socket: %s", opt_error);
         relay_logf("output socket: %s\n", opt_error);
-        close_output(s->tracker_slot, srt_out);
+        close_output(s->slot, srt_out);
         return SRT_INVALID_SOCK;
     }
 
@@ -150,10 +151,10 @@ static SRTSOCKET connect_srt_output(const session_t *s, char *error_out, size_t 
     if (srt_connect(srt_out, (struct sockaddr *)&s->target->out_addr,
                     (int)s->target->out_addrlen) == SRT_ERROR) {
         report_connect_failure(s, srt_out, error_out, error_out_sz);
-        close_output(s->tracker_slot, srt_out);
+        close_output(s->slot, srt_out);
         return SRT_INVALID_SOCK;
     }
-    if (!tracker_is_current(s->tracker_slot, SRT_INVALID_SOCK, srt_out)) {
+    if (!tracker_is_current(s->slot, SRT_INVALID_SOCK, srt_out)) {
         return SRT_INVALID_SOCK;
     }
 
@@ -164,7 +165,7 @@ static SRTSOCKET connect_srt_output(const session_t *s, char *error_out, size_t 
  * count. `what` names the step in the retry log line. Returns the delay in ms. */
 static int record_output_failure(session_t *s, const char *what) {
     int delay_ms = retry_failed(&s->retry, now_ms());
-    set_stream_retry_failures(s->state_slot, s->retry.failures);
+    set_stream_retry_failures(s->slot, s->retry.failures);
     relay_logf("Output %s retry streamid=%s failures=%d retry_ms=%d\n", what,
                streamid_or_empty(s->streamid), s->retry.failures, delay_ms);
     return delay_ms;
@@ -176,20 +177,19 @@ static void connect_srt_output_with_retry(session_t *s) {
     char output_error[OUTPUT_ERROR_MAX];
     s->srt_out = connect_srt_output(s, output_error, sizeof output_error);
     if (s->srt_out != SRT_INVALID_SOCK) {
-        set_stream_output_connected(s->state_slot, 1);
+        set_stream_output_connected(s->slot, 1);
         retry_connected(&s->retry, now_ms());
         return;
     }
 
     int delay_ms = record_output_failure(s, "publish");
-    set_stream_output_connected(s->state_slot, 0);
+    set_stream_output_connected(s->slot, 0);
     if (output_error[0]) {
-        set_stream_errorf(s->state_slot,
-                          "Failed to publish to downstream output: %s; retrying in %d ms",
+        set_stream_errorf(s->slot, "Failed to publish to downstream output: %s; retrying in %d ms",
                           output_error, delay_ms);
     } else {
-        set_stream_errorf(s->state_slot,
-                          "Failed to publish to downstream output; retrying in %d ms", delay_ms);
+        set_stream_errorf(s->slot, "Failed to publish to downstream output; retrying in %d ms",
+                          delay_ms);
     }
 }
 
@@ -198,13 +198,13 @@ static void connect_srt_output_with_retry(session_t *s) {
 /* Claims the stream's state for this session. A streamid that is already active
  * waits up to DUPLICATE_TAKEOVER_WAIT_MS: if the holder's input has been silent
  * for DUPLICATE_TAKEOVER_STALE_MS it is closed and replaced, otherwise this
- * session is rejected. Returns 0 to carry on, with s->state_slot set (-1 for an
- * empty streamid, which has no state), or -1 after logging why the session
+ * session is rejected. Returns 0 to carry on (a session with an empty streamid has
+ * no stream and carries on without one), or -1 after logging why the session
  * must end. */
 static int acquire_stream_state(session_t *s) {
-    s->state_slot = claim_stream_state(s->streamid, s->tracker_slot);
+    claim_result_t claim = claim_stream_state(s->streamid, s->slot);
 
-    if (s->state_slot == CLAIM_STREAM_IN_USE) {
+    if (claim == CLAIM_STREAM_IN_USE) {
         long long deadline = now_ms() + DUPLICATE_TAKEOVER_WAIT_MS;
         int takeover_started = 0;
         do {
@@ -213,33 +213,33 @@ static int acquire_stream_state(session_t *s) {
             int stream_present = stream_input_age_ms(s->streamid, now, &input_age_ms) == 0;
 
             if (!stream_present) {
-                s->state_slot = claim_stream_state(s->streamid, s->tracker_slot);
-                if (s->state_slot != CLAIM_STREAM_IN_USE) break;
+                claim = claim_stream_state(s->streamid, s->slot);
+                if (claim != CLAIM_STREAM_IN_USE) break;
             } else if (input_age_ms >= DUPLICATE_TAKEOVER_STALE_MS) {
                 if (!takeover_started) {
                     set_last_errorf("Duplicate publisher takeover for stale streamid=%s",
                                     s->streamid);
                     relay_logf("Duplicate publisher takeover for stale streamid=%s\n", s->streamid);
-                    tracker_close_streamid(s->streamid, s->tracker_slot);
+                    tracker_close_streamid(s->streamid, s->slot);
                     takeover_started = 1;
                 }
-                s->state_slot = claim_stream_state(s->streamid, s->tracker_slot);
-                if (s->state_slot != CLAIM_STREAM_IN_USE) break;
+                claim = claim_stream_state(s->streamid, s->slot);
+                if (claim != CLAIM_STREAM_IN_USE) break;
             }
 
             struct timespec ts;
             ts.tv_sec = 0;
             ts.tv_nsec = 50 * 1000 * 1000;
             nanosleep(&ts, NULL);
-        } while (relay_running() && s->state_slot == CLAIM_STREAM_IN_USE && now_ms() < deadline);
+        } while (relay_running() && now_ms() < deadline);
 
-        if (s->state_slot == CLAIM_STREAM_IN_USE) {
+        if (claim == CLAIM_STREAM_IN_USE) {
             set_last_errorf("Duplicate publisher rejected for active streamid=%s", s->streamid);
             relay_logf("Duplicate publisher rejected for active streamid=%s\n", s->streamid);
             return -1;
         }
     }
-    if (s->state_slot < 0 && s->streamid[0]) {
+    if (claim == CLAIM_STREAM_SLOT_BUSY) {
         set_last_errorf("No stream state slot available for streamid=%s", s->streamid);
         relay_logf("No stream state slot available for streamid=%s\n", s->streamid);
         return -1;
@@ -260,12 +260,12 @@ static void handle_output_send_failure(session_t *s) {
     int out_port = 0;
     format_leg_addr(&s->target->out_addr, out_ip, sizeof out_ip, &out_port);
     set_last_errorf("srt_sendmsg2: %s", srt_getlasterror_str());
-    set_stream_errorf(s->state_slot, "Relay output error to %s:%d (input peer %s:%d): %s", out_ip,
+    set_stream_errorf(s->slot, "Relay output error to %s:%d (input peer %s:%d): %s", out_ip,
                       out_port, s->peer_ip, s->peer_port, srt_getlasterror_str());
-    set_stream_output_connected(s->state_slot, 0);
+    set_stream_output_connected(s->slot, 0);
     relay_logf("srt_sendmsg2 failed peer=%s:%d streamid=%s error=\"%s\"\n", s->peer_ip,
                s->peer_port, streamid_or_empty(s->streamid), srt_getlasterror_str());
-    close_output(s->tracker_slot, s->srt_out);
+    close_output(s->slot, s->srt_out);
     s->srt_out = SRT_INVALID_SOCK;
 
     record_output_failure(s, "send");
@@ -277,8 +277,7 @@ static void *session_main(void *arg) {
     session_t s;
     memset(&s, 0, sizeof s);
     s.target = args->target;
-    s.tracker_slot = args->tracker_slot;
-    s.state_slot = -1;
+    s.slot = args->slot;
     s.srt_out = SRT_INVALID_SOCK;
     snprintf(s.peer_ip, sizeof s.peer_ip, "%s", args->peer_ip[0] ? args->peer_ip : "?");
     s.peer_port = args->peer_port;
@@ -294,7 +293,7 @@ static void *session_main(void *arg) {
             s.streamid[0] = '\0';
         }
     }
-    tracker_set_streamid(s.tracker_slot, s.streamid);
+    tracker_set_streamid(s.slot, s.streamid);
 
     int input_bonded = (conn & SRTGROUP_MASK) != 0;
     int recv_timeout_ms = RECV_TIMEOUT_MS;
@@ -307,12 +306,11 @@ static void *session_main(void *arg) {
                s.peer_ip, s.peer_port, streamid_or_empty(s.streamid));
 
     if (acquire_stream_state(&s) != 0) {
-        if (tracker_take_input(s.tracker_slot, conn) != SRT_INVALID_SOCK) srt_close(conn);
-        tracker_unregister(s.tracker_slot);
+        tracker_release(s.slot, conn);
         return NULL;
     }
 
-    set_stream_input_info(s.state_slot, input_bonded, s.peer_ip, s.peer_port);
+    set_stream_input_info(s.slot, input_bonded, s.peer_ip, s.peer_port);
     connect_srt_output_with_retry(&s);
 
     char buf[CHUNK];
@@ -320,7 +318,7 @@ static void *session_main(void *arg) {
         if (s.srt_out == SRT_INVALID_SOCK && retry_due(&s.retry, now_ms())) {
             connect_srt_output_with_retry(&s);
         }
-        if (retry_check_healthy(&s.retry, now_ms())) set_stream_retry_failures(s.state_slot, 0);
+        if (retry_check_healthy(&s.retry, now_ms())) set_stream_retry_failures(s.slot, 0);
 
         SRT_MSGCTRL mc = srt_msgctrl_default;
         int r = srt_recvmsg2(conn, buf, CHUNK, &mc);
@@ -329,45 +327,46 @@ static void *session_main(void *arg) {
             /* No data within RECV_TIMEOUT_MS (libsrt reports it as EASYNCRCV): go round
              * again so the loop conditions are re-checked. */
             if (err == SRT_EASYNCRCV || err == SRT_ETIMEOUT) {
-                update_stream_srt_counters(s.state_slot, s.tracker_slot, conn, s.srt_out, 0);
+                update_stream_srt_counters(s.slot, conn, s.srt_out, 0);
                 continue;
             }
             if (err != SRT_ECONNLOST && err != SRT_ENOCONN) {
                 close_reason = "input_error";
                 set_last_errorf("srt_recvmsg2: %s", srt_getlasterror_str());
-                set_stream_errorf(s.state_slot, "Input error from peer %s:%d: %s", s.peer_ip,
-                                  s.peer_port, srt_getlasterror_str());
+                set_stream_errorf(s.slot, "Input error from peer %s:%d: %s", s.peer_ip, s.peer_port,
+                                  srt_getlasterror_str());
                 relay_logf("srt_recvmsg2 failed peer=%s:%d streamid=%s error=\"%s\"\n", s.peer_ip,
                            s.peer_port, streamid_or_empty(s.streamid), srt_getlasterror_str());
             }
             break;
         }
         if (r <= 0) continue;
-        record_stream_input_progress(s.state_slot);
-        update_stream_srt_counters(s.state_slot, s.tracker_slot, conn, s.srt_out, 0);
+        record_stream_input_progress(s.slot);
+        update_stream_srt_counters(s.slot, conn, s.srt_out, 0);
 
         if (s.srt_out != SRT_INVALID_SOCK) {
             if (srt_sendmsg2(s.srt_out, buf, r, NULL) == SRT_ERROR) {
                 handle_output_send_failure(&s);
                 continue;
             }
-            record_stream_forward_progress(s.state_slot, r);
+            record_stream_forward_progress(s.slot, r);
             bytes_forwarded += r;
             packets_forwarded++;
         }
     }
 
     if (!relay_running()) close_reason = "shutdown";
-    update_stream_srt_counters(s.state_slot, s.tracker_slot, conn, s.srt_out, 1);
-    if (s.srt_out != SRT_INVALID_SOCK) close_output(s.tracker_slot, s.srt_out);
-    remove_stream_state(s.state_slot);
+    update_stream_srt_counters(s.slot, conn, s.srt_out, 1);
+    if (s.srt_out != SRT_INVALID_SOCK) close_output(s.slot, s.srt_out);
+    /* The stream goes before the slot is released: the next session to get this slot
+     * claims it, and a slot that still holds a stream is refused. */
+    remove_stream_state(s.slot);
     relay_logf("Connection closed peer=%s:%d streamid=%s reason=%s duration_ms=%lld "
                "bytes_forwarded=%lld packets_forwarded=%lld\n",
                s.peer_ip, s.peer_port, streamid_or_empty(s.streamid), close_reason,
                now_ms() - started_at_ms, bytes_forwarded, packets_forwarded);
 
-    if (tracker_take_input(s.tracker_slot, conn) != SRT_INVALID_SOCK) srt_close(conn);
-    tracker_unregister(s.tracker_slot);
+    tracker_release(s.slot, conn);
     return NULL;
 }
 
@@ -383,8 +382,8 @@ void session_spawn(SRTSOCKET conn, const output_target_t *target,
     args->conn = conn;
     args->target = target;
     format_leg_addr(peer, args->peer_ip, sizeof args->peer_ip, &args->peer_port);
-    args->tracker_slot = tracker_register(conn);
-    if (args->tracker_slot < 0) {
+    args->slot = tracker_register(conn);
+    if (args->slot < 0) {
         set_last_errorf("Too many active sessions; rejecting connection");
         relay_logf("Too many active sessions; rejecting connection\n");
         srt_close(conn);
@@ -396,10 +395,7 @@ void session_spawn(SRTSOCKET conn, const output_target_t *target,
     if (pthread_create(&tid, NULL, session_main, args) != 0) {
         set_last_errorf("pthread_create(session) failed");
         relay_logf("pthread_create failed\n");
-        /* Take the socket before closing it: a shutdown at this moment may already
-         * have taken it, and only the thread that took a socket closes it. */
-        if (tracker_take_input(args->tracker_slot, conn) != SRT_INVALID_SOCK) srt_close(conn);
-        tracker_unregister(args->tracker_slot);
+        tracker_release(args->slot, conn);
         free(args);
         return;
     }
