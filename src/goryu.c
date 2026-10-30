@@ -87,6 +87,13 @@ static int read_args(int argc, char *argv[], relay_args_t *args) {
             relay_logf("Bad config file %s: %s\n", argv[1], err);
             return -1;
         }
+        /* Ignored, not refused, so a config with an extra key still starts; but a
+         * misspelled optional key changes what the relay does, so it is said. */
+        if (file_cfg.unknown_key_count > 0) {
+            relay_logf("Config file %s: ignoring %d unknown key(s), the first is \"%s\"; "
+                       "check the spelling\n",
+                       argv[1], file_cfg.unknown_key_count, file_cfg.unknown_key);
+        }
         if (build_srt_uri(args->input_uri, sizeof args->input_uri, file_cfg.input_host,
                           file_cfg.input_port, file_cfg.passphrase, 1) != 0 ||
             build_srt_uri(args->output_uri, sizeof args->output_uri, file_cfg.output_host,

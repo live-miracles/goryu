@@ -86,7 +86,7 @@ Navigation only; correct an entry when a change makes it stale.
   `stats_sample_t`; `stream_state_apply_stats` stores it.
 - `src/status_api.c`, `src/json_out.c` - the loopback HTTP thread and status JSON;
   the JSON writers (unit-tested).
-- `src/relay_config.c/.h` - `goryu.json` parsing, the passphrase rule,
+- `src/relay_config.c/.h` - `goryu.json` parsing (a strict scanner, [ADR 0012](docs/adr/0012-goryu-json-is-read-by-a-strict-scanner.md)), the passphrase rule,
   `build_srt_uri`, `redact_srt_uri`, URI and query parsing (unit-tested).
 - `src/srt_opts.c` (apply and check SRT options), `net.c` (addresses),
   `log.c` (timestamps, the libsrt log cap), `runtime.c` (run flag, signals,

@@ -40,9 +40,19 @@ The first six fields are required (`output_passphrase` is optional), the three p
 must be whole numbers from 1 to 65535 and each passphrase must be empty or 10 to 79
 characters. Anything else makes
 Goryu exit at startup with `Bad config file <path>: <reason>` and a non-zero
-status, where the reason names the key (never its value). The parser reads a flat
-JSON object by key, so keep the file to these keys and no comments. In a
-string only the escapes `\"`, `\\` and `\/` are understood; any other is refused.
+status, where the reason names the key or the byte where the file stopped making
+sense (never a value). The file is a flat JSON object read by a small scanner
+([why](../adr/0012-goryu-json-is-read-by-a-strict-scanner.md)), so keep it to these
+keys and no comments:
+
+- A duplicate key, a nested object or array, a missing or trailing comma, or text
+  after the closing brace is refused.
+- A key Goryu does not know is ignored, with a log line naming the first one
+  (`Config file <path>: ignoring 1 unknown key(s), the first is "outpt_passphrase";
+  check the spelling`). It is not refused so that a config with an extra key still
+  starts, but a misspelled `output_passphrase` would otherwise change what the relay
+  does without a word.
+- In a string only the escapes `\"`, `\\` and `\/` are understood; any other is refused.
 
 In this mode the input listener runs `transtype=live` with `latency=240` ms and
 group connections enabled, and the downstream connection is a caller with

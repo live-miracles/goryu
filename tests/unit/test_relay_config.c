@@ -209,6 +209,110 @@ static void test_cfg_is_cleared_on_failure(void) {
     CHECK(cfg.input_port == 0 && cfg.passphrase[0] == '\0');
 }
 
+/* The six required keys with valid values, for tests that add or break something else. */
+#define SIX_KEYS                                                                                   \
+    "\"input_host\":\"a\",\"input_port\":1,\"output_host\":\"b\",\"output_port\":2,"               \
+    "\"status_port\":3,\"passphrase\":\"\""
+
+/* A value that happens to be a key's name is a value, not that key. */
+static void test_a_value_can_be_a_key_name(void) {
+    const char *json = "{\"input_host\":\"passphrase\",\"input_port\":1,"
+                       "\"output_host\":\"status_port\",\"output_port\":2,\"status_port\":3,"
+                       "\"passphrase\":\"\"}";
+    file_config_t cfg;
+    char err[256] = "";
+    CHECK(parse_config_json(json, &cfg, err, sizeof err) == 0);
+    CHECK_STR(cfg.input_host, "passphrase");
+    CHECK_STR(cfg.output_host, "status_port");
+    CHECK(cfg.status_port == 3);
+}
+
+static void test_duplicate_keys_are_refused(void) {
+    file_config_t cfg;
+    char err[256] = "";
+    CHECK(parse_config_json("{" SIX_KEYS ",\"input_host\":\"c\"}", &cfg, err, sizeof err) == -1);
+    CHECK(strstr(err, "input_host") != NULL);
+    err[0] = '\0';
+    CHECK(parse_config_json("{" SIX_KEYS ",\"output_passphrase\":\"\",\"output_passphrase\":\"\"}",
+                            &cfg, err, sizeof err) == -1);
+    CHECK(strstr(err, "output_passphrase") != NULL);
+}
+
+/* The file is a flat object: a nested value is refused, not searched for keys. */
+static void test_nested_values_are_refused(void) {
+    file_config_t cfg;
+    CHECK(parse_config_json("{" SIX_KEYS ",\"extra\":{\"output_passphrase\":\"\"}}", &cfg, NULL,
+                            0) == -1);
+    CHECK(parse_config_json("{" SIX_KEYS ",\"extra\":[1,2]}", &cfg, NULL, 0) == -1);
+    CHECK(parse_config_json("{\"extra\":{" SIX_KEYS "}}", &cfg, NULL, 0) == -1);
+}
+
+static void test_text_after_the_object_is_refused(void) {
+    file_config_t cfg;
+    CHECK(parse_config_json("{" SIX_KEYS "}", &cfg, NULL, 0) == 0);
+    CHECK(parse_config_json("{" SIX_KEYS "}\n  \n", &cfg, NULL, 0) == 0);
+    CHECK(parse_config_json("{" SIX_KEYS "} garbage", &cfg, NULL, 0) == -1);
+    CHECK(parse_config_json("{" SIX_KEYS "}{" SIX_KEYS "}", &cfg, NULL, 0) == -1);
+}
+
+static void test_syntax_errors_are_refused(void) {
+    file_config_t cfg;
+    CHECK(parse_config_json("{" SIX_KEYS ",}", &cfg, NULL, 0) == -1);        /* trailing comma */
+    CHECK(parse_config_json("{" SIX_KEYS "\"x\":1}", &cfg, NULL, 0) == -1);  /* missing comma */
+    CHECK(parse_config_json("{" SIX_KEYS ",\"x\" 1}", &cfg, NULL, 0) == -1); /* missing colon */
+    CHECK(parse_config_json("{" SIX_KEYS ",x:1}", &cfg, NULL, 0) == -1);     /* key not a string */
+    CHECK(parse_config_json("{" SIX_KEYS, &cfg, NULL, 0) == -1);             /* no closing brace */
+    CHECK(parse_config_json("[" SIX_KEYS "]", &cfg, NULL, 0) == -1);         /* not an object */
+    CHECK(parse_config_json("  {" SIX_KEYS "}", &cfg, NULL, 0) == 0); /* leading space is fine */
+    /* the old text search read a file that starts with a UTF-8 byte order mark */
+    CHECK(parse_config_json("\xEF\xBB\xBF{" SIX_KEYS "}", &cfg, NULL, 0) == 0);
+    CHECK(parse_config_json("{\xEF\xBB\xBF" SIX_KEYS "}", &cfg, NULL, 0) == -1);
+}
+
+/* An optional key with a typo is ignored, but it must be visible to the caller. */
+static void test_unknown_keys_are_counted(void) {
+    file_config_t cfg;
+    char err[256] = "";
+    CHECK(parse_config_json("{" SIX_KEYS "}", &cfg, err, sizeof err) == 0);
+    CHECK(cfg.unknown_key_count == 0 && cfg.unknown_key[0] == '\0');
+
+    CHECK(parse_config_json("{" SIX_KEYS
+                            ",\"outpt_passphrase\":\"\",\"b\":true,\"c\":null,\"d\":1.5}",
+                            &cfg, err, sizeof err) == 0);
+    CHECK(cfg.unknown_key_count == 4);
+    CHECK_STR(cfg.unknown_key, "outpt_passphrase");
+    CHECK(!cfg.output_passphrase_explicit);
+
+    /* the name is logged, so a newline or a non-ASCII byte in it cannot reach the log as itself */
+    CHECK(parse_config_json("{" SIX_KEYS ",\"a\nb\xc3\xa9\\\"c\":1}", &cfg, err, sizeof err) == 0);
+    CHECK_STR(cfg.unknown_key, "a?b??\"c");
+
+    /* a very long name is cut to fit, not an error */
+    char json[512], name[200];
+    repeat(name, 'k', 150);
+    snprintf(json, sizeof json, "{%s,\"%s\":1}", SIX_KEYS, name);
+    CHECK(parse_config_json(json, &cfg, err, sizeof err) == 0);
+    CHECK(cfg.unknown_key_count == 1 && strlen(cfg.unknown_key) == sizeof cfg.unknown_key - 1);
+}
+
+/* Errors name the key or a byte offset, never anything the file contained. */
+static void test_syntax_errors_do_not_echo_the_file(void) {
+    file_config_t cfg;
+    char err[256] = "";
+    const char *bad[] = {
+        "{\"passphrase\":\"supersecret0123\" \"x\":1}",
+        "{\"passphrase\":\"supersecret0123\",\"passphrase\":\"supersecret0123\"}",
+        "{\"supersecret0123\":{}}",
+        "supersecret0123",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+        err[0] = '\0';
+        CHECK(parse_config_json(bad[i], &cfg, err, sizeof err) == -1);
+        CHECK(err[0] != '\0');
+        CHECK(strstr(err, "supersecret") == NULL);
+    }
+}
+
 static void test_load_config_file(void) {
     file_config_t cfg;
     char err[256] = "";
@@ -568,6 +672,13 @@ int main(void) {
     test_host_length();
     test_empty_and_garbage();
     test_cfg_is_cleared_on_failure();
+    test_a_value_can_be_a_key_name();
+    test_duplicate_keys_are_refused();
+    test_nested_values_are_refused();
+    test_text_after_the_object_is_refused();
+    test_syntax_errors_are_refused();
+    test_unknown_keys_are_counted();
+    test_syntax_errors_do_not_echo_the_file();
     test_load_config_file();
     test_parse_uri_table();
     test_parse_uri_buffers();

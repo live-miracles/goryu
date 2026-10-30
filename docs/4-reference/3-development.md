@@ -43,7 +43,10 @@ a `streamStates` field and the pid of the process it started.
   API response, because the work dir is gone once CI ends. Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
   downstream_drops duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
   bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
-  bonded_abrupt_end`.
+  bonded_abrupt_end unknown_key`.
+- **Config edge cases.** `bad_config` refuses malformed files (a duplicate key,
+  a nested object, text after the object, a missing comma) and `unknown_key` checks that a
+  misspelled key starts the relay and is named in the log.
 - **Bonded input is simulated.** ffmpeg cannot open a socket group, so
   `tests/e2e/bonded_caller.c` does: a small libsrt caller that reads MPEG-TS from
   stdin and sends it as a broadcast group (or a main/backup one, `--type backup

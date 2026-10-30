@@ -256,6 +256,7 @@ scenario_cli() {
 scenario_bad_config() {
     ports 1
     local name body
+    local six="\"input_host\":\"127.0.0.1\",\"input_port\":$IN,\"output_host\":\"127.0.0.1\",\"output_port\":$OUT,\"status_port\":$STATUS,\"passphrase\":\"\""
     while IFS='|' read -r name body; do
         printf '%s\n' "$body" >"$WORK/bad-$name.json"
         check "config with $name is refused (exit 1, never listens)" bash -c \
@@ -268,7 +269,23 @@ port above 65535|{"input_host":"127.0.0.1","input_port":65536,"output_host":"127
 a port that wraps to a valid one|{"input_host":"127.0.0.1","input_port":$((IN + 4294967296)),"output_host":"127.0.0.1","output_port":$OUT,"status_port":$STATUS,"passphrase":""}
 a passphrase shorter than 10 characters|{"input_host":"127.0.0.1","input_port":$IN,"output_host":"127.0.0.1","output_port":$OUT,"status_port":$STATUS,"passphrase":"short"}
 a passphrase longer than 79 characters|{"input_host":"127.0.0.1","input_port":$IN,"output_host":"127.0.0.1","output_port":$OUT,"status_port":$STATUS,"passphrase":"$(printf 'p%.0s' $(seq 1 80))"}
+a duplicate key|{$six,"input_host":"127.0.0.2"}
+a nested object|{$six,"extra":{"output_passphrase":""}}
+text after the object|{$six} {$six}
+a missing comma|{"input_host":"127.0.0.1" "input_port":$IN,"output_host":"127.0.0.1","output_port":$OUT,"status_port":$STATUS,"passphrase":""}
 EOF
+}
+
+# An optional key with a typo is ignored, which changes what the relay does (here the
+# output would fall back to the input's passphrase), so the relay says so.
+scenario_unknown_key() {
+    ports 23
+    printf '{"input_host":"127.0.0.1","input_port":%d,"output_host":"127.0.0.1","output_port":%d,"status_port":%d,"passphrase":"","outpt_passphrase":""}\n' \
+        "$IN" "$OUT" "$STATUS" >"$WORK/c.json"
+    start_goryu "$WORK/c.json" "$WORK/g.log"
+    check "a config with an unknown key still starts" status
+    check "the unknown key is named in the log" log_has \
+        'ignoring 1 unknown key(s), the first is "outpt_passphrase"' "$WORK/g.log"
 }
 
 scenario_forward() {
@@ -702,7 +719,7 @@ scenario_churn() {
 
 # --- run --------------------------------------------------------------------
 
-ALL=(cli bad_config uri_mode output_passphrase forward downstream_down downstream_drops duplicate takeover two_streams passphrase sigterm
+ALL=(cli bad_config unknown_key uri_mode output_passphrase forward downstream_down downstream_drops duplicate takeover two_streams passphrase sigterm
     shutdown_silent churn bonded bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
     bonded_abrupt_end)
 SELECTED=("${@:-${ALL[@]}}")

@@ -25,7 +25,7 @@ small modules listed [below](#modules). It has three kinds of thread.
 | `stream_state.c` | The shared, mutex-protected telemetry per stream, plus the process-level `lastError` |
 | `stats.c` | Reads libsrt's counters for a session into a sample that `stream_state.c` applies |
 | `status_api.c`, `json_out.c` | The loopback HTTP thread and the JSON writers |
-| `relay_config.c` | `goryu.json`, URI and query parsing, passphrase rules, URI redaction |
+| `relay_config.c` | `goryu.json` (a strict scanner for a flat object), URI and query parsing, passphrase rules, URI redaction |
 | `srt_opts.c` | Applies SRT options from a query and reports a refused one |
 | `ratelimit.c` | A fixed window that lets a few events through and counts the rest (used for the leg join/leave log lines) |
 | `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays and one session's retry state |

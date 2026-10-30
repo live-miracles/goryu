@@ -23,6 +23,12 @@ typedef struct file_config {
      * downstream is not encrypted. */
     char output_passphrase[256];
     int output_passphrase_explicit;
+    /* Keys in the file that Goryu does not know. They are ignored, but a typo in
+     * an optional key (an "output_passphrase" that is not spelled so) changes what
+     * the relay does, so the count and the first name (never a value) are kept for
+     * the caller to warn about. */
+    int unknown_key_count;
+    char unknown_key[64];
 } file_config_t;
 
 int parse_uri(const char *uri, char *scheme, size_t scheme_sz, char *host, size_t host_sz,

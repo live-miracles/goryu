@@ -107,55 +107,197 @@ static const char *skip_ws(const char *p) {
     return p;
 }
 
-/* Finds "key": and returns the position of its value, or NULL. This is a text
- * search, not a JSON parser: the file is documented to be a flat object of the keys
- * in docs/2-usage/1-configuration.md. */
-static const char *json_find_value(const char *json, const char *key) {
-    char needle[128];
-    snprintf(needle, sizeof needle, "\"%s\"", key);
-    const char *p = strstr(json, needle);
-    if (!p) return NULL;
-    p = strchr(p + strlen(needle), ':');
-    if (!p) return NULL;
-    return skip_ws(p + 1);
-}
+/* goryu.json is a flat object of the keys in docs/2-usage/1-configuration.md, with
+ * string and integer values. It is read in one pass by the scanner below, not by a
+ * JSON library (the build depends on nothing but libsrt and OpenSSL). Anything outside
+ * that shape (a duplicate key, a nested value, a missing comma, text after the
+ * object) is refused with the byte where it went wrong, so it cannot be mistaken
+ * for a setting. */
 
-/* Reads a string value. Only the escapes \" \\ and \/ are decoded; any other
- * escape is refused rather than silently turned into a different string (a
- * passphrase containing \n would otherwise be read as the letter n). */
-static int json_get_string(const char *json, const char *key, char *out, size_t out_sz) {
-    const char *p = json_find_value(json, key);
-    if (!p || *p != '"') return 0;
-    ++p;
+typedef enum { STR_OK, STR_UNUSABLE, STR_SYNTAX } str_result_t;
 
+/* Scans the string whose opening quote *pp points at and moves *pp past the
+ * closing quote. Copies it into out (NULL with out_sz 0 to skip it), always
+ * NUL-terminated, decoding only the escapes \" \\ and \/. Returns STR_UNUSABLE for
+ * a well-formed string that cannot be a value: any other escape is refused rather
+ * than silently turned into a different string (a passphrase containing \n would
+ * otherwise be read as the letter n), and so is one that does not fit. Returns
+ * STR_SYNTAX, leaving *pp alone, when the string never ends. */
+static str_result_t scan_string(const char **pp, char *out, size_t out_sz) {
+    const char *p = *pp + 1;
     size_t len = 0;
+    int usable = 1;
+
     while (*p && *p != '"') {
         if (*p == '\\') {
             ++p;
-            if (*p != '"' && *p != '\\' && *p != '/') return 0;
+            if (!*p) break;
+            if (*p != '"' && *p != '\\' && *p != '/') usable = 0;
         }
-        if (len + 1 >= out_sz) return 0;
-        out[len++] = *p++;
+        if (len + 1 < out_sz)
+            out[len] = *p;
+        else
+            usable = 0;
+        ++len;
+        ++p;
     }
-    if (*p != '"') return 0;
-    out[len] = '\0';
+    if (*p != '"') return STR_SYNTAX;
+    if (out_sz > 0) out[len < out_sz ? len : out_sz - 1] = '\0';
+    *pp = p + 1;
+    return usable ? STR_OK : STR_UNUSABLE;
+}
+
+/* The end of a number or literal (true, false, null): the next delimiter. */
+static const char *scan_token(const char *p) {
+    while (*p && *p != ',' && *p != '}' && *p != ' ' && *p != '\n' && *p != '\r' && *p != '\t')
+        ++p;
+    return p;
+}
+
+/* The shape of a value the relay ignores: a JSON number or true, false or null. */
+static int is_number_or_literal(const char *tok, const char *end) {
+    size_t n = (size_t)(end - tok);
+    if ((n == 4 && memcmp(tok, "true", 4) == 0) || (n == 4 && memcmp(tok, "null", 4) == 0) ||
+        (n == 5 && memcmp(tok, "false", 5) == 0))
+        return 1;
+    if (!(*tok == '-' || (*tok >= '0' && *tok <= '9'))) return 0;
+    for (const char *c = tok; c < end; ++c) {
+        if (!((*c >= '0' && *c <= '9') || *c == '-' || *c == '+' || *c == '.' || *c == 'e' ||
+              *c == 'E'))
+            return 0;
+    }
     return 1;
 }
 
-/* Reads an integer value: digits only (optional sign), no fraction or exponent,
- * and it must fit an int, so 4294977377 is refused instead of wrapping to 10081. */
-static int json_get_int(const char *json, const char *key, int *out) {
-    const char *p = json_find_value(json, key);
-    if (!p) return 0;
-    char *end = NULL;
+/* An integer value: digits only (optional sign), no fraction or exponent, and it
+ * must fit an int, so 4294977377 is refused instead of wrapping to 10081. */
+static int parse_int_token(const char *tok, const char *end, int *out) {
+    char *num_end = NULL;
     errno = 0;
-    long v = strtol(p, &end, 10);
-    if (end == p || errno == ERANGE || v < INT_MIN || v > INT_MAX) return 0;
-    if (*end != '\0' && *end != ',' && *end != '}' && *end != ' ' && *end != '\n' && *end != '\r' &&
-        *end != '\t')
-        return 0;
+    long v = strtol(tok, &num_end, 10);
+    if (num_end != end || errno == ERANGE || v < INT_MIN || v > INT_MAX) return 0;
     *out = (int)v;
     return 1;
+}
+
+typedef struct known_key {
+    const char *name;
+    int is_int;
+    size_t offset; /* of the field in file_config_t */
+    size_t size;   /* of a string field */
+} known_key_t;
+
+#define STRING_KEY(field)                                                                          \
+    {#field, 0, offsetof(file_config_t, field), sizeof(((file_config_t *)0)->field)}
+#define INT_KEY(field) {#field, 1, offsetof(file_config_t, field), 0}
+
+/* In the order they are checked, so the first problem reported is the first key's. */
+static const known_key_t KNOWN_KEYS[] = {
+    STRING_KEY(input_host),        INT_KEY(input_port),  STRING_KEY(output_host),
+    INT_KEY(output_port),          INT_KEY(status_port), STRING_KEY(passphrase),
+    STRING_KEY(output_passphrase),
+};
+#define KNOWN_KEY_COUNT (sizeof KNOWN_KEYS / sizeof KNOWN_KEYS[0])
+#define OUTPUT_PASSPHRASE_KEY (KNOWN_KEY_COUNT - 1) /* the only optional key */
+
+static int syntax_error(char *err, size_t err_sz, const char *json, const char *at,
+                        const char *what) {
+    if (err && err_sz > 0) {
+        snprintf(err, err_sz, "not a flat JSON object: %s at byte %zu", what, (size_t)(at - json));
+    }
+    return -1;
+}
+
+/* Keeps the first unknown key's name for the warning, cut to fit and with anything
+ * that is not printable ASCII replaced, because it is written to the log. */
+static void note_unknown_key(file_config_t *cfg, const char *name) {
+    if (cfg->unknown_key_count++ > 0) return;
+    size_t n = 0;
+    for (; name[n] && n + 1 < sizeof cfg->unknown_key; ++n) {
+        unsigned char c = (unsigned char)name[n];
+        cfg->unknown_key[n] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+    }
+    cfg->unknown_key[n] = '\0';
+}
+
+/* Reads the object into cfg. seen[i] and usable[i] say, for each known key, that it
+ * appeared and that its value has the right type and fits. A value of the wrong
+ * type is not a syntax error: parse_config_json reports it by key name. */
+static int scan_config(const char *json, file_config_t *cfg, int *seen, int *usable, char *err,
+                       size_t err_sz) {
+    /* A UTF-8 byte order mark, which some Windows editors put at the start of a file,
+     * is not part of the object. */
+    const char *p = skip_ws(strncmp(json, "\xEF\xBB\xBF", 3) == 0 ? json + 3 : json);
+    if (*p != '{') return syntax_error(err, err_sz, json, p, "expected '{'");
+    p = skip_ws(p + 1);
+
+    int first = 1;
+    for (;;) {
+        if (first && *p == '}') {
+            ++p;
+            break;
+        }
+        if (*p != '"') return syntax_error(err, err_sz, json, p, "expected a key");
+        const char *at = p;
+        char name[64];
+        str_result_t key_result = scan_string(&p, name, sizeof name);
+        if (key_result == STR_SYNTAX)
+            return syntax_error(err, err_sz, json, at, "unterminated key");
+
+        int idx = -1;
+        for (size_t i = 0; key_result == STR_OK && i < KNOWN_KEY_COUNT; ++i) {
+            if (strcmp(name, KNOWN_KEYS[i].name) == 0) idx = (int)i;
+        }
+        p = skip_ws(p);
+        if (*p != ':') return syntax_error(err, err_sz, json, p, "expected ':'");
+        p = skip_ws(p + 1);
+
+        if (idx < 0) {
+            note_unknown_key(cfg, name);
+        } else if (seen[idx]) {
+            set_err(err, err_sz, "duplicate \"%s\"", KNOWN_KEYS[idx].name);
+            return -1;
+        } else {
+            seen[idx] = 1;
+        }
+        char *field = idx >= 0 ? (char *)cfg + KNOWN_KEYS[idx].offset : NULL;
+        int want_string = idx >= 0 && !KNOWN_KEYS[idx].is_int;
+
+        if (*p == '{' || *p == '[') return syntax_error(err, err_sz, json, p, "nested value");
+        if (*p == '"') {
+            at = p;
+            str_result_t value_result =
+                scan_string(&p, want_string ? field : NULL, want_string ? KNOWN_KEYS[idx].size : 0);
+            if (value_result == STR_SYNTAX)
+                return syntax_error(err, err_sz, json, at, "unterminated string");
+            if (want_string) usable[idx] = value_result == STR_OK;
+        } else {
+            const char *end = scan_token(p);
+            if (end == p) return syntax_error(err, err_sz, json, p, "expected a value");
+            if (idx >= 0) {
+                if (KNOWN_KEYS[idx].is_int) usable[idx] = parse_int_token(p, end, (int *)field);
+            } else if (!is_number_or_literal(p, end)) {
+                return syntax_error(err, err_sz, json, p, "unexpected value");
+            }
+            p = end;
+        }
+
+        p = skip_ws(p);
+        if (*p == ',') {
+            p = skip_ws(p + 1);
+            first = 0;
+            continue;
+        }
+        if (*p == '}') {
+            ++p;
+            break;
+        }
+        return syntax_error(err, err_sz, json, p, "expected ',' or '}'");
+    }
+
+    p = skip_ws(p);
+    if (*p) return syntax_error(err, err_sz, json, p, "unexpected text after the object");
+    return 0;
 }
 
 typedef struct uri_writer {
@@ -283,43 +425,40 @@ static int port_in_range(int port) {
     return port > 0 && port <= 65535;
 }
 
-int parse_config_json(const char *json, file_config_t *cfg, char *err, size_t err_sz) {
-    memset(cfg, 0, sizeof *cfg);
+static int read_config(const char *json, file_config_t *cfg, char *err, size_t err_sz) {
+    int seen[KNOWN_KEY_COUNT] = {0};
+    int usable[KNOWN_KEY_COUNT] = {0};
+    if (scan_config(json, cfg, seen, usable, err, err_sz) != 0) return -1;
 
-#define FAIL_KEY(key)                                                                              \
-    do {                                                                                           \
-        set_err(err, err_sz, "missing or invalid \"%s\"", key);                                    \
-        return -1;                                                                                 \
-    } while (0)
+    for (size_t i = 0; i < KNOWN_KEY_COUNT; ++i) {
+        /* output_passphrase is optional. Present means the downstream has its own
+         * passphrase, "" included; a key that is present but not a string is an
+         * error, not "absent". */
+        if (i == OUTPUT_PASSPHRASE_KEY && !seen[i]) continue;
+        int in_range =
+            KNOWN_KEYS[i].is_int ? port_in_range(*(int *)((char *)cfg + KNOWN_KEYS[i].offset)) : 1;
+        if (!seen[i] || !usable[i] || !in_range) {
+            set_err(err, err_sz, "missing or invalid \"%s\"", KNOWN_KEYS[i].name);
+            return -1;
+        }
+    }
 
-    if (!json_get_string(json, "input_host", cfg->input_host, sizeof cfg->input_host))
-        FAIL_KEY("input_host");
-    if (!json_get_int(json, "input_port", &cfg->input_port) || !port_in_range(cfg->input_port))
-        FAIL_KEY("input_port");
-    if (!json_get_string(json, "output_host", cfg->output_host, sizeof cfg->output_host))
-        FAIL_KEY("output_host");
-    if (!json_get_int(json, "output_port", &cfg->output_port) || !port_in_range(cfg->output_port))
-        FAIL_KEY("output_port");
-    if (!json_get_int(json, "status_port", &cfg->status_port) || !port_in_range(cfg->status_port))
-        FAIL_KEY("status_port");
-    if (!json_get_string(json, "passphrase", cfg->passphrase, sizeof cfg->passphrase))
-        FAIL_KEY("passphrase");
-
-    /* Optional. Present means the downstream has its own passphrase, "" included;
-     * a key that is present but not a string is an error, not "absent". */
-    if (json_find_value(json, "output_passphrase")) {
-        if (!json_get_string(json, "output_passphrase", cfg->output_passphrase,
-                             sizeof cfg->output_passphrase))
-            FAIL_KEY("output_passphrase");
+    if (seen[OUTPUT_PASSPHRASE_KEY]) {
         cfg->output_passphrase_explicit = 1;
     } else {
         snprintf(cfg->output_passphrase, sizeof cfg->output_passphrase, "%s", cfg->passphrase);
     }
-#undef FAIL_KEY
 
     if (check_passphrase("passphrase", cfg->passphrase, err, err_sz) != 0) return -1;
     if (check_passphrase("output_passphrase", cfg->output_passphrase, err, err_sz) != 0) return -1;
     return 0;
+}
+
+int parse_config_json(const char *json, file_config_t *cfg, char *err, size_t err_sz) {
+    memset(cfg, 0, sizeof *cfg);
+    int rc = read_config(json, cfg, err, err_sz);
+    if (rc != 0) memset(cfg, 0, sizeof *cfg); /* no half-read passphrase is left behind */
+    return rc;
 }
 
 /* A config is a few hundred bytes. Refuse anything that is not a regular file
