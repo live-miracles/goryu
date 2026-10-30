@@ -18,6 +18,11 @@
 #define DUPLICATE_TAKEOVER_WAIT_MS 5000
 #define DUPLICATE_TAKEOVER_STALE_MS 5000
 
+/* A streamid for a log line or message; an empty one has no stream. */
+static inline const char *streamid_or_empty(const char *streamid) {
+    return streamid && streamid[0] ? streamid : "(empty)";
+}
+
 static inline int max_int(int a, int b) {
     return a > b ? a : b;
 }

@@ -4,6 +4,6 @@ Duplicate takeover (which closes only the stale holder's sockets) and shutdown c
 
 ## Consequences
 
-Session code must not call `srt_close` on a tracked socket directly: it takes the socket first, as `close_output` does for the output. A session ends its hold on its slot with `tracker_release`, which ends its stream, takes the input, closes it if it got it, and only then unregisters the slot; a rejected session, a finished one and a failed `pthread_create` all use it. The calls before a session is registered (allocation failure, session table full) are not tracked, so they close directly.
+Session code must not call `srt_close` on a tracked socket directly: it takes the socket first, as the output does for the downstream socket (`close_socket` in `output.c`). A session ends its hold on its slot with `tracker_release`, which ends its stream, takes the input, closes it if it got it, and only then unregisters the slot; a rejected session, a finished one and a failed `pthread_create` all use it. The calls before a session is registered (allocation failure, session table full) are not tracked, so they close directly.
 
 It pairs with the sampler holding the tracker lock across its libsrt calls (see [ADR 0002](0002-status-thread-never-calls-libsrt.md)).

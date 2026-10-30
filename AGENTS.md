@@ -78,9 +78,15 @@ Navigation only; correct an entry when a change makes it stale.
 - `src/relay_options.c` - the command line (a config file or two URIs) and the
   `SRT_BONDING_STATUS_PORT` override turned into one options struct; pure, so a
   refusal is a message and is unit-tested.
-- `src/session.c` - one session thread (`session_main`): streamid, downstream
-  connect and backoff, the read/send loop (it wakes every `RECV_TIMEOUT_MS` so a
-  closed session ends); `session_spawn` starts it.
+- `src/session.c` - one session thread (`session_main`): streamid, the read/send
+  loop (it wakes every `RECV_TIMEOUT_MS` so a closed session ends); `session_spawn`
+  starts it.
+- `src/output.c` - a session's connection to the downstream (`output_service`,
+  `output_send`, `output_close`): connect, the backoff after every failed connect or
+  send, the healthy period, and the tracker and stream telemetry kept in step. It
+  reaches libsrt only through an `output_transport_t`; `src/srt_output.c` is the libsrt
+  one (socket options, connect, reject reason, send). Unit-tested with a scripted
+  transport and a fake clock.
 - `src/tracker.c` - a session's place in the relay (slot table, `tracker_*`): its
   sockets (how one thread closes another's, how shutdown waits for all of them), the
   streamid it holds, the duplicate wait and takeover (`tracker_acquire_stream`), and

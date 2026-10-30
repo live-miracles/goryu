@@ -9,4 +9,4 @@ A downstream can accept the SRT handshake and then reject the stream, for exampl
 
 ## Consequences
 
-`retryFailures` in the status API can stay above 0 for up to 10 s after a downstream recovers. The `downstream_drops` scenario uses a downstream that closes 50 ms after accepting (`tests/e2e/closing_sink.c`) and a 4 Mbps publisher, because a quiet publisher would let a wrong fix pass.
+`retryFailures` in the status API can stay above 0 for up to 10 s after a downstream recovers. `tests/unit/test_output.c` pins the rule without a process: a connect that succeeds does not clear the count, the count clears after exactly `OUTPUT_HEALTHY_MS`, and the delays double up to 16 s. The `downstream_drops` scenario uses a downstream that closes 50 ms after accepting (`tests/e2e/closing_sink.c`) and a 4 Mbps publisher, because a quiet publisher would let a wrong fix pass.

@@ -7,13 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "backoff.h"
 #include "log.h"
 #include "net.h"
+#include "output.h"
 #include "relay_common.h"
 #include "relay_config.h"
 #include "runtime.h"
-#include "srt_opts.h"
+#include "srt_output.h"
 #include "stats.h"
 #include "stream_state.h"
 #include "tracker.h"
@@ -25,9 +25,6 @@
  * group: libsrt defers closing a group that is in use. Waking once a second lets
  * the session notice that it was closed. */
 #define RECV_TIMEOUT_MS 1000
-/* Room for the longest connect failure message: a 1023-byte streamid, libsrt's error
- * text and the reject reason. */
-#define OUTPUT_ERROR_MAX 2048
 
 typedef struct session_args {
     SRTSOCKET conn;
@@ -47,13 +44,8 @@ typedef struct session {
     char streamid[1024];
     char peer_ip[INET6_ADDRSTRLEN];
     int peer_port;
-    SRTSOCKET srt_out; /* the downstream socket; SRT_INVALID_SOCK while it is down */
-    retry_state_t retry;
+    output_t output; /* the connection to the downstream */
 } session_t;
-
-static const char *streamid_or_empty(const char *streamid) {
-    return streamid && streamid[0] ? streamid : "(empty)";
-}
 
 static int stream_input_still_connected(SRTSOCKET conn) {
     SRT_SOCKSTATUS st = srt_getsockstate(conn);
@@ -71,148 +63,7 @@ static int get_streamid(SRTSOCKET sock, char *sid, size_t sid_sz) {
     return sid_len > 0;
 }
 
-/* ---- downstream connection ---- */
-
-/* Records a failed connect in the process error, the log and error_out. The
- * reject reason, when libsrt gives one, is part of all three. */
-static void report_connect_failure(const session_t *s, SRTSOCKET srt_out, char *error_out,
-                                   size_t error_out_sz) {
-    char out_ip[INET6_ADDRSTRLEN] = "?";
-    int out_port = 0;
-    format_leg_addr(&s->target->out_addr, out_ip, sizeof out_ip, &out_port);
-    int error_code = srt_getlasterror(NULL);
-    char error_text[256];
-    snprintf(error_text, sizeof error_text, "%s", srt_getlasterror_str());
-    int reject_reason = error_code == SRT_ECONNREJ ? srt_getrejectreason(srt_out) : SRT_REJ_UNKNOWN;
-    const char *reason_text =
-        reject_reason != SRT_REJ_UNKNOWN ? srt_rejectreason_str(reject_reason) : NULL;
-
-    char detail[128] = "";
-    char log_suffix[128] = "";
-    if (reject_reason != SRT_REJ_UNKNOWN) {
-        const char *reason = reason_text ? reason_text : "unknown";
-        snprintf(detail, sizeof detail, " (reject=%s/%d)", reason, reject_reason);
-        snprintf(log_suffix, sizeof log_suffix, " reject=%s/%d", reason, reject_reason);
-    }
-
-    if (error_out && error_out_sz > 0) {
-        snprintf(error_out, error_out_sz, "srt_connect target=%s:%d streamid=%s: %s%s", out_ip,
-                 out_port, streamid_or_empty(s->streamid), error_text, detail);
-    }
-    set_last_errorf("srt_connect target=%s:%d streamid=%s: %s%s", out_ip, out_port,
-                    streamid_or_empty(s->streamid), error_text, detail);
-    relay_logf("srt_connect failed target=%s:%d streamid=%s error=\"%s\"%s\n", out_ip, out_port,
-               streamid_or_empty(s->streamid), error_text, log_suffix);
-}
-
-static void close_output(int slot, SRTSOCKET srt_out) {
-    if (tracker_take_output(slot, srt_out) != SRT_INVALID_SOCK) {
-        srt_close(srt_out);
-    }
-}
-
-static SRTSOCKET connect_srt_output(const session_t *s, char *error_out, size_t error_out_sz) {
-    if (error_out && error_out_sz > 0) error_out[0] = '\0';
-
-    SRTSOCKET srt_out = srt_create_socket();
-    if (srt_out == SRT_INVALID_SOCK) {
-        if (error_out && error_out_sz > 0) {
-            snprintf(error_out, error_out_sz, "srt_create_socket(out): %s", srt_getlasterror_str());
-        }
-        set_last_errorf("srt_create_socket(out): %s", srt_getlasterror_str());
-        relay_logf("srt_create_socket(out): %s\n", srt_getlasterror_str());
-        return SRT_INVALID_SOCK;
-    }
-    tracker_set_output_socket(s->slot, srt_out);
-
-    SRT_TRANSTYPE tt = SRTT_LIVE;
-    srt_setsockflag(srt_out, SRTO_TRANSTYPE, &tt, sizeof tt);
-    char opt_error[256];
-    if (apply_srt_opts(srt_out, s->target->out_query, opt_error, sizeof opt_error) != 0) {
-        if (error_out && error_out_sz > 0) {
-            snprintf(error_out, error_out_sz, "output socket: %s", opt_error);
-        }
-        set_last_errorf("output socket: %s", opt_error);
-        relay_logf("output socket: %s\n", opt_error);
-        close_output(s->slot, srt_out);
-        return SRT_INVALID_SOCK;
-    }
-
-    if (s->streamid[0]) {
-        srt_setsockflag(srt_out, SRTO_STREAMID, s->streamid, (int)strlen(s->streamid));
-    }
-
-    int cto = 3000;
-    srt_setsockflag(srt_out, SRTO_CONNTIMEO, &cto, sizeof cto);
-
-    if (srt_connect(srt_out, (struct sockaddr *)&s->target->out_addr,
-                    (int)s->target->out_addrlen) == SRT_ERROR) {
-        report_connect_failure(s, srt_out, error_out, error_out_sz);
-        close_output(s->slot, srt_out);
-        return SRT_INVALID_SOCK;
-    }
-    if (!tracker_is_current(s->slot, SRT_INVALID_SOCK, srt_out)) {
-        return SRT_INVALID_SOCK;
-    }
-
-    return srt_out;
-}
-
-/* Counts a failed connect or send, schedules the next attempt and publishes the
- * count. `what` names the step in the retry log line. Returns the delay in ms. */
-static int record_output_failure(session_t *s, const char *what) {
-    int delay_ms = retry_failed(&s->retry, now_ms());
-    set_stream_retry_failures(s->slot, s->retry.failures);
-    relay_logf("Output %s retry streamid=%s failures=%d retry_ms=%d\n", what,
-               streamid_or_empty(s->streamid), s->retry.failures, delay_ms);
-    return delay_ms;
-}
-
-/* Tries once and sets s->srt_out. On success it starts the healthy-period clock; on
- * failure it counts the failure and records why in the stream's lastError. */
-static void connect_srt_output_with_retry(session_t *s) {
-    char output_error[OUTPUT_ERROR_MAX];
-    s->srt_out = connect_srt_output(s, output_error, sizeof output_error);
-    if (s->srt_out != SRT_INVALID_SOCK) {
-        set_stream_output_connected(s->slot, 1);
-        retry_connected(&s->retry, now_ms());
-        return;
-    }
-
-    int delay_ms = record_output_failure(s, "publish");
-    set_stream_output_connected(s->slot, 0);
-    if (output_error[0]) {
-        set_stream_errorf(s->slot, "Failed to publish to downstream output: %s; retrying in %d ms",
-                          output_error, delay_ms);
-    } else {
-        set_stream_errorf(s->slot, "Failed to publish to downstream output; retrying in %d ms",
-                          delay_ms);
-    }
-}
-
 /* ---- the session ---- */
-
-/* A send failure almost always means the transport-level connect succeeded (SRS
- * accepts the SRT handshake) but the stream was then rejected or torn down by
- * SRS's on_publish hook. Without backoff, a persistently unauthorized stream key
- * reconnects and fails again in a tight loop bounded only by handshake + hook
- * round-trip time (seen in production at 10-40 ms intervals, sustained
- * indefinitely). So it goes through the same backoff table as a failed connect. */
-static void handle_output_send_failure(session_t *s) {
-    char out_ip[INET6_ADDRSTRLEN] = "?";
-    int out_port = 0;
-    format_leg_addr(&s->target->out_addr, out_ip, sizeof out_ip, &out_port);
-    set_last_errorf("srt_sendmsg2: %s", srt_getlasterror_str());
-    set_stream_errorf(s->slot, "Relay output error to %s:%d (input peer %s:%d): %s", out_ip,
-                      out_port, s->peer_ip, s->peer_port, srt_getlasterror_str());
-    set_stream_output_connected(s->slot, 0);
-    relay_logf("srt_sendmsg2 failed peer=%s:%d streamid=%s error=\"%s\"\n", s->peer_ip,
-               s->peer_port, streamid_or_empty(s->streamid), srt_getlasterror_str());
-    close_output(s->slot, s->srt_out);
-    s->srt_out = SRT_INVALID_SOCK;
-
-    record_output_failure(s, "send");
-}
 
 static void *session_main(void *arg) {
     session_args_t *args = arg;
@@ -221,11 +72,9 @@ static void *session_main(void *arg) {
     memset(&s, 0, sizeof s);
     s.target = args->target;
     s.slot = args->slot;
-    s.srt_out = SRT_INVALID_SOCK;
     snprintf(s.peer_ip, sizeof s.peer_ip, "%s", args->peer_ip[0] ? args->peer_ip : "?");
     s.peer_port = args->peer_port;
     free(args);
-    retry_init(&s.retry);
     long long started_at_ms = now_ms();
     long long bytes_forwarded = 0;
     long long packets_forwarded = 0;
@@ -253,14 +102,13 @@ static void *session_main(void *arg) {
     }
 
     set_stream_input_info(s.slot, input_bonded, s.peer_ip, s.peer_port);
-    connect_srt_output_with_retry(&s);
+    output_init(&s.output, &srt_output_transport, s.target, s.slot, s.streamid, s.peer_ip,
+                s.peer_port);
+    output_service(&s.output);
 
     char buf[CHUNK];
     while (relay_running() && stream_input_still_connected(conn)) {
-        if (s.srt_out == SRT_INVALID_SOCK && retry_due(&s.retry, now_ms())) {
-            connect_srt_output_with_retry(&s);
-        }
-        if (retry_check_healthy(&s.retry, now_ms())) set_stream_retry_failures(s.slot, 0);
+        output_service(&s.output);
 
         SRT_MSGCTRL mc = srt_msgctrl_default;
         int r = srt_recvmsg2(conn, buf, CHUNK, &mc);
@@ -269,7 +117,7 @@ static void *session_main(void *arg) {
             /* No data within RECV_TIMEOUT_MS (libsrt reports it as EASYNCRCV): go round
              * again so the loop conditions are re-checked. */
             if (err == SRT_EASYNCRCV || err == SRT_ETIMEOUT) {
-                update_stream_srt_counters(s.slot, conn, s.srt_out, 0);
+                update_stream_srt_counters(s.slot, conn, output_socket(&s.output), 0);
                 continue;
             }
             if (err != SRT_ECONNLOST && err != SRT_ENOCONN) {
@@ -284,13 +132,9 @@ static void *session_main(void *arg) {
         }
         if (r <= 0) continue;
         record_stream_input_progress(s.slot);
-        update_stream_srt_counters(s.slot, conn, s.srt_out, 0);
+        update_stream_srt_counters(s.slot, conn, output_socket(&s.output), 0);
 
-        if (s.srt_out != SRT_INVALID_SOCK) {
-            if (srt_sendmsg2(s.srt_out, buf, r, NULL) == SRT_ERROR) {
-                handle_output_send_failure(&s);
-                continue;
-            }
+        if (output_send(&s.output, buf, r) == OUTPUT_SENT) {
             record_stream_forward_progress(s.slot, r);
             bytes_forwarded += r;
             packets_forwarded++;
@@ -298,8 +142,8 @@ static void *session_main(void *arg) {
     }
 
     if (!relay_running()) close_reason = "shutdown";
-    update_stream_srt_counters(s.slot, conn, s.srt_out, 1);
-    if (s.srt_out != SRT_INVALID_SOCK) close_output(s.slot, s.srt_out);
+    update_stream_srt_counters(s.slot, conn, output_socket(&s.output), 1);
+    output_close(&s.output);
     relay_logf("Connection closed peer=%s:%d streamid=%s reason=%s duration_ms=%lld "
                "bytes_forwarded=%lld packets_forwarded=%lld\n",
                s.peer_ip, s.peer_port, streamid_or_empty(s.streamid), close_reason,
