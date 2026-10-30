@@ -396,8 +396,10 @@ void session_spawn(SRTSOCKET conn, const output_target_t *target,
     if (pthread_create(&tid, NULL, session_main, args) != 0) {
         set_last_errorf("pthread_create(session) failed");
         relay_logf("pthread_create failed\n");
+        /* Take the socket before closing it: a shutdown at this moment may already
+         * have taken it, and only the thread that took a socket closes it. */
+        if (tracker_take_input(args->tracker_slot, conn) != SRT_INVALID_SOCK) srt_close(conn);
         tracker_unregister(args->tracker_slot);
-        srt_close(conn);
         free(args);
         return;
     }

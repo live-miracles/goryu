@@ -4,6 +4,6 @@ Duplicate takeover and shutdown close sockets that belong to another session's t
 
 ## Consequences
 
-Session code must not call `srt_close` on a tracked socket directly: it takes the socket first, as `session_main` does for its input and `close_output` does for its output. The calls before a session is registered (allocation failure, session table full) are not tracked, so they close directly. The one tracked exception is the `pthread_create` failure path in `session_spawn`, which closes the input after `tracker_unregister`; a shutdown at that moment could close it twice.
+Session code must not call `srt_close` on a tracked socket directly: it takes the socket first, as `session_main` does for its input and `close_output` does for its output. The calls before a session is registered (allocation failure, session table full) are not tracked, so they close directly. The `pthread_create` failure path in `session_spawn` does the same: it takes the input, closes it if it got it, and only then unregisters the slot.
 
 It pairs with the sampler holding the tracker lock across its libsrt calls (see [ADR 0002](0002-status-thread-never-calls-libsrt.md)).
