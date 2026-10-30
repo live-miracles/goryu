@@ -452,6 +452,10 @@ scenario_uri_mode() {
     check "a non-srt scheme is refused" bash -c \
         "env $env_status LD_LIBRARY_PATH='$LIB_DIR' timeout 5 '$BIN' 'udp://127.0.0.1:$IN' '$out_uri' >/dev/null 2>&1; [ \$? -eq 1 ]"
 
+    check "a status port variable that is not a port is ignored, and the log says so" bash -c \
+        "SRT_BONDING_STATUS_PORT=nope LD_LIBRARY_PATH='$LIB_DIR' timeout 3 '$BIN' '$in_uri' '$out_uri' >'$WORK/u4.log' 2>&1; \
+         grep -q 'SRT_BONDING_STATUS_PORT is not a port number' '$WORK/u4.log'"
+
     start_sink
     env "$env_status" LD_LIBRARY_PATH="$LIB_DIR" "$BIN" "$in_uri&passphrase=$PASSPHRASE" \
         "$out_uri&passphrase=$PASSPHRASE&pbkeylen=16" >"$WORK/g.log" 2>&1 &

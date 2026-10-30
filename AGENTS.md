@@ -73,8 +73,11 @@ Every failure or recovery path should leave a line that explains it afterwards.
 
 Navigation only; correct an entry when a change makes it stale.
 
-- `src/goryu.c` - entry point only: arguments and config, the listener, the
-  accept loop and the shutdown order.
+- `src/goryu.c` - entry point only: the listener, the accept loop and the shutdown
+  order (`shutdown_relay`, the one place that order is written).
+- `src/relay_options.c` - the command line (a config file or two URIs) and the
+  `SRT_BONDING_STATUS_PORT` override turned into one options struct; pure, so a
+  refusal is a message and is unit-tested.
 - `src/session.c` - one session thread (`session_main`): streamid, duplicate
   takeover (`acquire_stream_state`), downstream connect and backoff, the
   read/send loop (it wakes every `RECV_TIMEOUT_MS` so a closed session ends);
@@ -192,7 +195,7 @@ Three layers, all run by CI (details in `docs/4-reference/3-development.md`):
 
 - `bash scripts/test-unit.sh` - no Docker, a few seconds. Pure modules: config and
   URI parsing, passphrase rules, redaction, backoff, JSON writers, the deadline-bound send, the telemetry rules, the status JSON
-  (every null rule), the stream state table.
+  (every null rule), the stream state table, the command line.
 - `bash scripts/smoke-test.sh` (needs Docker) - rebuilds, starts the binary from
   `goryu.json`, checks the usage failure, the status endpoint and the pid.
 - `bash scripts/test-e2e.sh` (needs ffmpeg, jq, Docker; about three minutes) - the

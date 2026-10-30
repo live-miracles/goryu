@@ -11,7 +11,11 @@ goryu --version
 The config-file form is the one to use. The two-URI form takes SRT socket
 options directly from each URI's query string (`transtype`, `groupconnect`,
 `latency`, `rcvlatency`, `passphrase`, `pbkeylen`) and listens for status on
-port `8081`.
+port `8081`. The environment variable `SRT_BONDING_STATUS_PORT` moves that port; it is
+the only way to do so in this form, and it overrides `status_port` of a config file
+too. A value that is not a port number (1 to 65535) is ignored, and the log says so
+(`SRT_BONDING_STATUS_PORT is not a port number ... ignored`). The variable keeps its
+name from before the rename to Goryu.
 
 ## goryu.json
 

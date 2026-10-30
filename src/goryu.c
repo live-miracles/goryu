@@ -40,7 +40,7 @@
 
 #include "log.h"
 #include "net.h"
-#include "relay_config.h"
+#include "relay_options.h"
 #include "runtime.h"
 #include "session.h"
 #include "srt_opts.h"
@@ -56,64 +56,6 @@
 #endif
 
 static const char *RELAY_VERSION_STRING = RELAY_VERSION;
-
-typedef struct relay_args {
-    char input_uri[2048];
-    char output_uri[2048];
-    int status_port;
-} relay_args_t;
-
-/* The two-URI form takes SRT options straight from the query strings, so apply
- * the same passphrase rule the config file gets. */
-static int check_uri_passphrase(const char *query, const char *which) {
-    char pass[512];
-    char err[256];
-    if (get_param(query, "passphrase", pass, sizeof pass) &&
-        check_passphrase("passphrase", pass, err, sizeof err) != 0) {
-        relay_logf("Bad %s URI: %s\n", which, err);
-        return -1;
-    }
-    return 0;
-}
-
-/* Fills args from the command line: either goryu.json or the two URIs. */
-static int read_args(int argc, char *argv[], relay_args_t *args) {
-    args->status_port = 8081;
-
-    if (argc == 2) {
-        file_config_t file_cfg;
-        char err[256];
-        if (load_config_file(argv[1], &file_cfg, err, sizeof err) < 0) {
-            relay_logf("Bad config file %s: %s\n", argv[1], err);
-            return -1;
-        }
-        /* Ignored, not refused, so a config with an extra key still starts; but a
-         * misspelled optional key changes what the relay does, so it is said. */
-        if (file_cfg.unknown_key_count > 0) {
-            relay_logf("Config file %s: ignoring %d unknown key(s), the first is \"%s\"; "
-                       "check the spelling\n",
-                       argv[1], file_cfg.unknown_key_count, file_cfg.unknown_key);
-        }
-        if (build_srt_uri(args->input_uri, sizeof args->input_uri, file_cfg.input_host,
-                          file_cfg.input_port, file_cfg.passphrase, 1) != 0 ||
-            build_srt_uri(args->output_uri, sizeof args->output_uri, file_cfg.output_host,
-                          file_cfg.output_port, file_cfg.output_passphrase, 0) != 0) {
-            relay_logf("Bad config file %s: failed to build SRT URI\n", argv[1]);
-            return -1;
-        }
-        args->status_port = file_cfg.status_port;
-    } else {
-        snprintf(args->input_uri, sizeof args->input_uri, "%s", argv[1]);
-        snprintf(args->output_uri, sizeof args->output_uri, "%s", argv[2]);
-    }
-
-    const char *status_port = getenv("SRT_BONDING_STATUS_PORT");
-    if (status_port && status_port[0]) {
-        int port = atoi(status_port);
-        if (port > 0 && port <= 65535) args->status_port = port;
-    }
-    return 0;
-}
 
 /* Creates, configures, binds and starts listening on the encoder-facing socket.
  * Returns SRT_INVALID_SOCK after logging why. */
@@ -178,6 +120,21 @@ static void accept_loop(SRTSOCKET srv, int ep, const output_target_t *target) {
     }
 }
 
+/* Stops the relay, in the order that matters: ask everything to stop, close the
+ * listener so no session starts, close every session's sockets and wait for the
+ * session threads, then join the status thread and release libsrt. ep is -1 when no
+ * epoll was created. Every way out of main after the listener is open goes through
+ * here, so the order is written once. */
+static void shutdown_relay(SRTSOCKET srv, int ep, int status_thread_started, pthread_t status_tid) {
+    relay_request_stop();
+    if (ep >= 0) srt_epoll_release(ep);
+    srt_close(srv);
+    tracker_close_all();
+    tracker_wait_all();
+    if (status_thread_started) pthread_join(status_tid, NULL);
+    srt_cleanup();
+}
+
 int main(int argc, char *argv[]) {
     if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
         puts(RELAY_VERSION_STRING);
@@ -193,46 +150,32 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    relay_args_t args;
-    if (read_args(argc, argv, &args) < 0) return 1;
-
-    /* A URI can carry a passphrase, so only a redacted copy is ever logged. */
-    char logged_input_uri[sizeof args.input_uri];
-    char logged_output_uri[sizeof args.output_uri];
-    redact_srt_uri(args.input_uri, logged_input_uri, sizeof logged_input_uri);
-    redact_srt_uri(args.output_uri, logged_output_uri, sizeof logged_output_uri);
-
-    char in_scheme[8], in_host[256], in_query[1024];
-    char out_scheme[8], out_host[256], out_query[1024];
-    int in_port, out_port;
-
-    if (parse_uri(args.input_uri, in_scheme, sizeof in_scheme, in_host, sizeof in_host, &in_port,
-                  in_query, sizeof in_query) < 0) {
-        relay_logf("Bad input URI: %s\n", logged_input_uri);
+    relay_options_t opts;
+    char err[512];
+    if (parse_relay_options(argc, argv, getenv("SRT_BONDING_STATUS_PORT"), &opts, err, sizeof err) <
+        0) {
+        relay_logf("%s\n", err);
         return 1;
     }
-    if (parse_uri(args.output_uri, out_scheme, sizeof out_scheme, out_host, sizeof out_host,
-                  &out_port, out_query, sizeof out_query) < 0) {
-        relay_logf("Bad output URI: %s\n", logged_output_uri);
-        return 1;
+    /* Ignored, not refused, so a config with an extra key still starts and a status
+     * port variable that is not a port does not stop the relay; but a misspelled
+     * optional key changes what the relay does, so they are said. */
+    if (opts.unknown_key_count > 0) {
+        relay_logf("Config file %s: ignoring %d unknown key(s), the first is \"%s\"; "
+                   "check the spelling\n",
+                   argv[1], opts.unknown_key_count, opts.unknown_key);
     }
-    if (strcmp(in_scheme, "srt") != 0) {
-        relay_logf("Input URI must use srt://\n");
-        return 1;
-    }
-    if (strcmp(out_scheme, "srt") != 0) {
-        relay_logf("Output URI must use srt://\n");
-        return 1;
-    }
-    if (check_uri_passphrase(in_query, "input") < 0 ||
-        check_uri_passphrase(out_query, "output") < 0) {
-        return 1;
+    if (opts.status_port_env_ignored) {
+        relay_logf("SRT_BONDING_STATUS_PORT is not a port number (1 to 65535), ignored; "
+                   "the status port is %d\n",
+                   opts.status_port);
     }
 
     output_target_t target;
     memset(&target, 0, sizeof target);
-    snprintf(target.out_query, sizeof target.out_query, "%s", out_query);
-    if (resolve_output_addr(out_host, out_port, &target.out_addr, &target.out_addrlen) < 0) {
+    snprintf(target.out_query, sizeof target.out_query, "%s", opts.out_query);
+    if (resolve_output_addr(opts.out_host, opts.out_port, &target.out_addr, &target.out_addrlen) <
+        0) {
         return 1;
     }
 
@@ -250,18 +193,18 @@ int main(int argc, char *argv[]) {
      * host it runs on. */
     log_install_srt_cap();
 
-    SRTSOCKET srv = open_listener(in_host, in_port, in_query);
+    SRTSOCKET srv = open_listener(opts.in_host, opts.in_port, opts.in_query);
     if (srv == SRT_INVALID_SOCK) {
         srt_cleanup();
         return 1;
     }
 
-    relay_logf("Listening on SRT (bonded and plain) %s:%d (backlog=%d) -> %s\n", in_host, in_port,
-               LISTEN_BACKLOG, logged_output_uri);
+    relay_logf("Listening on SRT (bonded and plain) %s:%d (backlog=%d) -> %s\n", opts.in_host,
+               opts.in_port, LISTEN_BACKLOG, opts.out_uri_redacted);
 
     pthread_t status_tid;
     int status_thread_started =
-        status_server_start(args.status_port, started_at_ms, &status_tid) == 0;
+        status_server_start(opts.status_port, started_at_ms, &status_tid) == 0;
     if (!status_thread_started) {
         set_last_errorf("pthread_create(status) failed");
         relay_logf("pthread_create(status) failed\n");
@@ -271,32 +214,19 @@ int main(int argc, char *argv[]) {
     if (ep < 0) {
         set_last_errorf("srt_epoll_create: %s", srt_getlasterror_str());
         relay_logf("srt_epoll_create: %s\n", srt_getlasterror_str());
-        srt_close(srv);
-        relay_request_stop();
-        if (status_thread_started) pthread_join(status_tid, NULL);
-        srt_cleanup();
+        shutdown_relay(srv, -1, status_thread_started, status_tid);
         return 1;
     }
     int ep_events = SRT_EPOLL_IN | SRT_EPOLL_ERR;
     if (srt_epoll_add_usock(ep, srv, &ep_events) == SRT_ERROR) {
         set_last_errorf("srt_epoll_add_usock: %s", srt_getlasterror_str());
         relay_logf("srt_epoll_add_usock: %s\n", srt_getlasterror_str());
-        srt_epoll_release(ep);
-        srt_close(srv);
-        relay_request_stop();
-        if (status_thread_started) pthread_join(status_tid, NULL);
-        srt_cleanup();
+        shutdown_relay(srv, ep, status_thread_started, status_tid);
         return 1;
     }
 
     accept_loop(srv, ep, &target);
 
-    relay_request_stop();
-    srt_epoll_release(ep);
-    srt_close(srv);
-    tracker_close_all();
-    tracker_wait_all();
-    if (status_thread_started) pthread_join(status_tid, NULL);
-    srt_cleanup();
+    shutdown_relay(srv, ep, status_thread_started, status_tid);
     return 0;
 }

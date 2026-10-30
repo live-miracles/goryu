@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for the modules that do not need libsrt: config and URI parsing,
-# the retry backoff, the status JSON, the telemetry rules, the stream state table and the
-# deadline-bound send. Needs only gcc.
+# the command line, the retry backoff, the status JSON, the telemetry rules, the stream
+# state table and the deadline-bound send. Needs only gcc.
 #
 # Built like the release (gcc, -Wall -Wextra, here with -Werror) under
 # AddressSanitizer and UndefinedBehaviorSanitizer.
@@ -16,6 +16,7 @@ WARN=(-Wall -Wextra -Werror)
 
 declare -A SOURCES=(
     [test_relay_config]="src/relay_config.c"
+    [test_relay_options]="src/relay_options.c src/relay_config.c"
     [test_backoff_json]="src/backoff.c src/json_out.c src/ratelimit.c"
     [test_timed_send]="src/timed_send.c"
     [test_telemetry]="src/telemetry.c src/ratelimit.c"

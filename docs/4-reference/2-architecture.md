@@ -19,7 +19,8 @@ small modules listed [below](#modules). It has three kinds of thread.
 
 | File | Role |
 |---|---|
-| `goryu.c` | Entry point: arguments and config, the listener, the accept loop, shutdown order |
+| `goryu.c` | Entry point: the listener, the accept loop, shutdown order |
+| `relay_options.c` | The command line (a config file or two URIs) and the status port variable, turned into one options struct. Pure |
 | `session.c` | One session thread: streamid, [duplicate publishers](../3-operations/1-reliability.md#duplicate-publishers), downstream connect and [retry](../3-operations/1-reliability.md#downstream-retry), the read/send loop |
 | `tracker.c` | The sockets of every live session, so one thread can close another's and the sampler never reads a closed socket |
 | `stream_state.c` | The shared, mutex-protected telemetry per stream, at the session's slot; a stream's claim on its streamid; the process-level `lastError` |
