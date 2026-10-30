@@ -101,7 +101,8 @@ Navigation only; correct an entry when a change makes it stale.
   `log.c` (timestamps, the libsrt log cap), `runtime.c` (run flag, signals,
   clock), `backoff.c` (retry delays and one session's retry state, unit-tested),
   `ratelimit.c` (a window that lets a few events through and counts the rest,
-  unit-tested; it bounds the bonded leg join/leave and the status-client log lines), `relay_common.h`
+  unit-tested; it bounds the bonded leg join/leave and the status-client log lines and
+  libsrt's own log cap), `relay_common.h`
   (limits).
 - `scripts/` - `build-local.sh` (Docker build into `objs/`), `build-release.sh`
   (archive + checksums into `build/`), `goryu.Dockerfile` (pinned base image and

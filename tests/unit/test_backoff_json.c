@@ -224,6 +224,32 @@ static void test_rate_window_summary_without_a_later_event(void) {
     CHECK(rate_window_take_suppressed(&w, 5000 + 60000, 60000) == 8);
 }
 
+/* libsrt's log cap (log.c) asks the window, on every message, for the summary of a
+ * window that has ended and then whether this line may go out. At the 2026-09-29
+ * rate (about 35 lines a second) that must write 20 lines a second, drop the rest,
+ * and say how many were dropped once the next second begins. */
+static void test_rate_window_as_the_libsrt_log_cap_uses_it(void) {
+    rate_window_t w = {0};
+    long long summaries = 0;
+    int written = 0;
+    for (int i = 0; i < 35; ++i) { /* 35 messages in one second, 28 ms apart */
+        long long now = 10000 + i * 28;
+        long long suppressed = rate_window_take_suppressed(&w, now, 1000);
+        CHECK(suppressed == 0);
+        written += rate_window_allow(&w, now, 20, 1000);
+    }
+    CHECK(written == 20);
+    /* the next second's first message reports the 15 that were dropped, and is written */
+    long long now = 11000;
+    summaries = rate_window_take_suppressed(&w, now, 1000);
+    CHECK(summaries == 15);
+    CHECK(rate_window_allow(&w, now, 20, 1000) == 1);
+    CHECK(rate_window_take_suppressed(&w, now + 1, 1000) == 0);
+    /* a quiet spell and then one message: nothing to report, and it is written */
+    CHECK(rate_window_take_suppressed(&w, 30000, 1000) == 0);
+    CHECK(rate_window_allow(&w, 30000, 20, 1000) == 1);
+}
+
 static void test_rate_window_edges(void) {
     rate_window_t w = {0};
     CHECK(rate_window_allow(&w, 100, 0, 1000) == 0); /* a limit of 0 blocks everything */
@@ -250,6 +276,7 @@ int main(void) {
     test_optional_values();
     test_rate_window_limits_and_counts();
     test_rate_window_summary_without_a_later_event();
+    test_rate_window_as_the_libsrt_log_cap_uses_it();
     test_rate_window_edges();
     TEST_SUMMARY("backoff_json");
 }

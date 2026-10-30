@@ -7,6 +7,7 @@
 
 #include <srt/srt.h>
 
+#include "ratelimit.h"
 #include "runtime.h"
 
 /* Prefixes every log line with a local-time, millisecond-precision timestamp
@@ -50,11 +51,10 @@ void relay_logf(const char *fmt, ...) {
  *     over, so the fact that something was noisy is still visible without
  *     the volume itself being the danger. */
 #define SRT_LOG_MAX_LINES_PER_SEC 20
+#define SRT_LOG_WINDOW_MS 1000
 
 static pthread_mutex_t g_srt_log_mu = PTHREAD_MUTEX_INITIALIZER;
-static long long g_srt_log_window_start_ms = 0;
-static int g_srt_log_count_in_window = 0;
-static long long g_srt_log_suppressed_in_window = 0;
+static rate_window_t g_srt_log_window; /* the same window the leg log lines use */
 
 static void srt_log_handler(void *opaque, int level, const char *file, int line, const char *area,
                             const char *message) {
@@ -63,22 +63,12 @@ static void srt_log_handler(void *opaque, int level, const char *file, int line,
     (void)line;
 
     long long now = now_ms();
-    int emit = 0;
-    long long suppressed_to_report = 0;
 
     pthread_mutex_lock(&g_srt_log_mu);
-    if (now - g_srt_log_window_start_ms >= 1000) {
-        suppressed_to_report = g_srt_log_suppressed_in_window;
-        g_srt_log_window_start_ms = now;
-        g_srt_log_count_in_window = 0;
-        g_srt_log_suppressed_in_window = 0;
-    }
-    if (g_srt_log_count_in_window < SRT_LOG_MAX_LINES_PER_SEC) {
-        g_srt_log_count_in_window++;
-        emit = 1;
-    } else {
-        g_srt_log_suppressed_in_window++;
-    }
+    long long suppressed_to_report =
+        rate_window_take_suppressed(&g_srt_log_window, now, SRT_LOG_WINDOW_MS);
+    int emit =
+        rate_window_allow(&g_srt_log_window, now, SRT_LOG_MAX_LINES_PER_SEC, SRT_LOG_WINDOW_MS);
     pthread_mutex_unlock(&g_srt_log_mu);
 
     if (suppressed_to_report > 0) {
