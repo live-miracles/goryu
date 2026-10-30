@@ -40,11 +40,12 @@ networks, a dead or rejecting downstream, and misbehaving encoders.
 - One bad stream must not affect another or crash the process. A session failure
   ends that session, not the relay.
 - Every retry, wait and buffer is bounded (backoff caps at 16 s, the takeover
-  wait is 5 s, the session table has 256 entries). Don't add an unbounded loop,
+  wait is 5 s, a status client gets 2 s, the session table has 256 entries). Don't add an unbounded loop,
   a tight retry or a growing allocation; no tight polling.
 - The status thread never calls libsrt; session threads sample and the status
   thread copies ([ADR 0002](docs/adr/0002-status-thread-never-calls-libsrt.md)).
-- The status port stays bound to `127.0.0.1`. It reports encoder addresses.
+- The status port stays bound to `127.0.0.1`. It reports encoder addresses and has no
+  authentication ([ADR 0013](docs/adr/0013-status-api-is-loopback-only-and-unauthenticated.md)).
 - Shutdown must close sockets and join session threads (`on_signal`,
   `close_active_session_sockets`, `wait_for_session_threads`); a change to
   session lifecycle is high-risk.
@@ -86,13 +87,15 @@ Navigation only; correct an entry when a change makes it stale.
   `stats_sample_t`; `stream_state_apply_stats` stores it.
 - `src/status_api.c`, `src/json_out.c` - the loopback HTTP thread and status JSON;
   the JSON writers (unit-tested).
+- `src/timed_send.c` - send a buffer with one total deadline (the status reply;
+  unit-tested over a socketpair).
 - `src/relay_config.c/.h` - `goryu.json` parsing (a strict scanner, [ADR 0012](docs/adr/0012-goryu-json-is-read-by-a-strict-scanner.md)), the passphrase rule,
   `build_srt_uri`, `redact_srt_uri`, URI and query parsing (unit-tested).
 - `src/srt_opts.c` (apply and check SRT options), `net.c` (addresses),
   `log.c` (timestamps, the libsrt log cap), `runtime.c` (run flag, signals,
   clock), `backoff.c` (retry delays and one session's retry state, unit-tested),
   `ratelimit.c` (a window that lets a few events through and counts the rest,
-  unit-tested; it bounds the bonded leg join/leave log lines), `relay_common.h`
+  unit-tested; it bounds the bonded leg join/leave and the status-client log lines), `relay_common.h`
   (limits).
 - `scripts/` - `build-local.sh` (Docker build into `objs/`), `build-release.sh`
   (archive + checksums into `build/`), `goryu.Dockerfile` (pinned base image and
@@ -181,7 +184,7 @@ Look at the newest file in that folder for the shape.
 Three layers, all run by CI (details in `docs/4-reference/3-development.md`):
 
 - `bash scripts/test-unit.sh` - no Docker, a few seconds. Pure modules: config and
-  URI parsing, passphrase rules, redaction, backoff, JSON writers.
+  URI parsing, passphrase rules, redaction, backoff, JSON writers, the deadline-bound send.
 - `bash scripts/smoke-test.sh` (needs Docker) - rebuilds, starts the binary from
   `goryu.json`, checks the usage failure, the status endpoint and the pid.
 - `bash scripts/test-e2e.sh` (needs ffmpeg, jq, Docker; about three minutes) - the

@@ -12,7 +12,7 @@ small modules listed [below](#modules). It has three kinds of thread.
 - **Session threads.** One per accepted stream. Each reads the deduplicated
   payload off the group socket with `srt_recvmsg2`, writes it downstream with
   `srt_sendmsg2`, and samples SRT statistics (below).
-- **Status HTTP thread.** Serves the [status API](1-status-api.md) on a
+- **Status HTTP thread.** Serves the [status API](1-status-api.md), one client at a time with a 2 s limit for each, on a
   loopback-only port.
 
 ## Modules
@@ -27,6 +27,7 @@ small modules listed [below](#modules). It has three kinds of thread.
 | `status_api.c`, `json_out.c` | The loopback HTTP thread and the JSON writers |
 | `relay_config.c` | `goryu.json` (a strict scanner for a flat object), URI and query parsing, passphrase rules, URI redaction |
 | `srt_opts.c` | Applies SRT options from a query and reports a refused one |
+| `timed_send.c` | Sends a buffer on a socket with one total deadline; the status thread uses it so a client that stops reading cannot hold it |
 | `ratelimit.c` | A fixed window that lets a few events through and counts the rest (used for the leg join/leave log lines) |
 | `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays and one session's retry state |
 

@@ -67,6 +67,7 @@ the SRS it forwards to shares the one passphrase, and Bunryu's installer rewrite
 |---|---:|
 | Session table entries | 256 |
 | Listen backlog | 64 |
+| Time a status API client gets to send its request, and again to take the reply | 2 s each |
 | Input listener address family | IPv4 |
 
 Goryu forwards; it does not decode, transcode, or buffer beyond SRT's own

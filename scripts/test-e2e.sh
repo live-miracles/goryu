@@ -288,6 +288,28 @@ scenario_unknown_key() {
         'ignoring 1 unknown key(s), the first is "outpt_passphrase"' "$WORK/g.log"
 }
 
+# The status port has no authentication, so a client that connects and sends nothing
+# must not keep the endpoint, or shutdown, waiting.
+idle_status_client() { # connects to the status port and sends nothing for 30 s
+    sleep 30 3<>"/dev/tcp/127.0.0.1/$STATUS" &
+    PIDS+=("$!")
+    sleep 0.3
+}
+
+scenario_status_idle_client() {
+    ports 24
+    write_config "$WORK/c.json" ""
+    start_goryu "$WORK/c.json" "$WORK/g.log"
+    check "status answers" status
+    idle_status_client
+    check "status answers again within 8 s of a client that connects and sends nothing" \
+        wait_for 8 status
+    check "the idle client is dropped and logged" wait_for 5 log_has "Status client sent no request" "$WORK/g.log"
+    idle_status_client
+    kill -TERM "$GPID"
+    check "SIGTERM with an idle status client attached exits within 6 s" exited_within "$GPID" 6
+}
+
 scenario_forward() {
     ports 2
     write_config "$WORK/c.json" ""
@@ -720,7 +742,7 @@ scenario_churn() {
 # --- run --------------------------------------------------------------------
 
 ALL=(cli bad_config unknown_key uri_mode output_passphrase forward downstream_down downstream_drops duplicate takeover two_streams passphrase sigterm
-    shutdown_silent churn bonded bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
+    status_idle_client shutdown_silent churn bonded bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
     bonded_abrupt_end)
 SELECTED=("${@:-${ALL[@]}}")
 

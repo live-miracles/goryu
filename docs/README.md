@@ -38,3 +38,4 @@ Why Goryu is built the way it is; each record names the alternatives that were r
 - [0010 The Docker image installs the published release](adr/0010-docker-image-installs-the-published-release.md)
 - [0011 A socket is untracked before it is closed](adr/0011-a-socket-is-untracked-before-it-is-closed.md)
 - [0012 goryu.json is read by a strict scanner](adr/0012-goryu-json-is-read-by-a-strict-scanner.md)
+- [0013 The status API is loopback-only and unauthenticated](adr/0013-status-api-is-loopback-only-and-unauthenticated.md)

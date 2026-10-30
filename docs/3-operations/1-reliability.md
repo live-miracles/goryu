@@ -77,7 +77,15 @@ running without encryption and accepting callers that sent none.
 The status HTTP server runs on its own thread and binds to `127.0.0.1` only.
 It never calls libsrt: it copies state that the session threads already
 collected, so polling it adds no work to the forwarding path. Do not expose the
-port; it reports encoder addresses.
+port; it reports encoder addresses, and it has no authentication: loopback is the
+only access control ([why](../adr/0013-status-api-is-loopback-only-and-unauthenticated.md)).
+
+One thread serves it, one client at a time, and a client gets 2 s to send its
+request and to take the reply. A client that connects and says nothing is dropped
+with `Status client sent no request within 2 s, dropped` (at most 3 such lines per
+minute, then a count). Before that limit a single idle local connection stopped the
+endpoint, and `SIGTERM` did not stop the relay within 13 s, because shutdown joins
+the status thread.
 
 ## What is not logged
 

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -13,9 +14,23 @@
 
 #include "json_out.h"
 #include "log.h"
+#include "ratelimit.h"
 #include "relay_common.h"
 #include "runtime.h"
 #include "stream_state.h"
+#include "timed_send.h"
+
+/* The status port has no authentication, and one thread serves it. A client that
+ * connects and sends nothing, or never reads the reply, must not hold that thread:
+ * the endpoint would stall and so would shutdown, which joins it. Measured before
+ * the limit: one idle local connection stopped the endpoint, and SIGTERM did not
+ * stop the relay within 13 s. A real client sends its request at once. The limit
+ * is for the request, and again for the whole reply. */
+#define STATUS_CLIENT_TIMEOUT_S 2
+/* The log lines about such clients: a poller stuck in a loop could otherwise write
+ * one every STATUS_CLIENT_TIMEOUT_S, for as long as it runs. */
+#define STATUS_LOG_MAX_PER_WINDOW 3
+#define STATUS_LOG_WINDOW_MS 60000
 
 static int g_status_port = 8081;
 static long long g_started_at_ms = 0;
@@ -35,20 +50,21 @@ static const char *member_state_str(int member_state) {
     }
 }
 
-static void write_status_response(int client_fd) {
+/* Returns 0 when the whole response was sent, -1 when it was not (the client
+ * stopped reading, or the connection failed). The response is built in memory first
+ * (at most one entry per session table slot) so that sending it has one deadline;
+ * through stdio on the socket every buffer flush would wait for the client again. */
+static int write_status_response(int client_fd) {
     relay_stream_state_t states[MAX_ACTIVE_SESSIONS];
     char last_error[LAST_ERROR_MAX];
     long long updated_at_ms = now_ms();
 
     stream_state_snapshot(states, last_error, sizeof last_error);
 
-    int out_fd = dup(client_fd);
-    if (out_fd < 0) return;
-    FILE *f = fdopen(out_fd, "w");
-    if (!f) {
-        close(out_fd);
-        return;
-    }
+    char *body = NULL;
+    size_t body_len = 0;
+    FILE *f = open_memstream(&body, &body_len);
+    if (!f) return -1;
 
     fputs("HTTP/1.1 200 OK\r\n"
           "Content-Type: application/json\r\n"
@@ -183,7 +199,13 @@ static void write_status_response(int client_fd) {
     fputc(']', f);
 
     fputs("}\n", f);
-    fclose(f);
+    if (fclose(f) != 0) {
+        free(body);
+        return -1;
+    }
+    int rc = send_all_within(client_fd, body, body_len, STATUS_CLIENT_TIMEOUT_S * 1000);
+    free(body);
+    return rc;
 }
 
 static void *status_http_main(void *arg) {
@@ -220,6 +242,7 @@ static void *status_http_main(void *arg) {
 
     relay_logf("Status HTTP listening on 127.0.0.1:%d\n", g_status_port);
 
+    rate_window_t client_log = {0}; /* only this thread uses it */
     while (relay_running()) {
         fd_set rfds;
         FD_ZERO(&rfds);
@@ -228,18 +251,33 @@ static void *status_http_main(void *arg) {
         tv.tv_sec = 1;
         tv.tv_usec = 0;
         int ready = select(srv + 1, &rfds, NULL, NULL, &tv);
+
+        long long suppressed =
+            rate_window_take_suppressed(&client_log, now_ms(), STATUS_LOG_WINDOW_MS);
+        if (suppressed > 0) {
+            relay_logf("Status client problems suppressed count=%lld in the last %d s\n",
+                       suppressed, STATUS_LOG_WINDOW_MS / 1000);
+        }
         if (ready <= 0) continue;
 
         int client = accept(srv, NULL, NULL);
         if (client < 0) continue;
 
+        struct timeval client_tv = {STATUS_CLIENT_TIMEOUT_S, 0};
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &client_tv, sizeof client_tv);
+
         char req[1024];
         ssize_t req_len = recv(client, req, sizeof req, 0);
-        if (req_len <= 0) {
-            close(client);
-            continue;
+        const char *problem = NULL;
+        if (req_len < 0) {
+            problem = "sent no request";
+        } else if (req_len > 0 && write_status_response(client) != 0) {
+            problem = "did not read the response";
+        } /* req_len == 0: the client closed without a request (a port probe); nothing to say */
+        if (problem && rate_window_allow(&client_log, now_ms(), STATUS_LOG_MAX_PER_WINDOW,
+                                         STATUS_LOG_WINDOW_MS)) {
+            relay_logf("Status client %s within %d s, dropped\n", problem, STATUS_CLIENT_TIMEOUT_S);
         }
-        write_status_response(client);
         close(client);
     }
 

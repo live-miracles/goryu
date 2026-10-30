@@ -30,8 +30,8 @@ a `streamStates` field and the pid of the process it started.
 ### Tests
 
 - **Unit tests** (`tests/unit/`) cover the code that needs no libsrt: config and
-  URI parsing, the passphrase rules and redaction, the retry backoff and the JSON
-  writers. Each test is built with the release's `gcc -Wall -Wextra` plus `-Werror`,
+  URI parsing, the passphrase rules and redaction, the retry backoff, the JSON
+  writers and the deadline-bound send (over a socketpair). Each test is built with the release's `gcc -Wall -Wextra` plus `-Werror`,
   under AddressSanitizer and UndefinedBehaviorSanitizer. A new check
   goes in the matching `tests/unit/test_*.c`.
 - **End-to-end tests** (`scripts/test-e2e.sh`) start the relay, a downstream and
@@ -43,10 +43,12 @@ a `streamStates` field and the pid of the process it started.
   API response, because the work dir is gone once CI ends. Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
   downstream_drops duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
   bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
-  bonded_abrupt_end unknown_key`.
-- **Config edge cases.** `bad_config` refuses malformed files (a duplicate key,
+  bonded_abrupt_end unknown_key status_idle_client`.
+- **Config and status edge cases.** `bad_config` refuses malformed files (a duplicate key,
   a nested object, text after the object, a missing comma) and `unknown_key` checks that a
-  misspelled key starts the relay and is named in the log.
+  misspelled key starts the relay and is named in the log. `status_idle_client` opens a
+  connection to the status port that sends nothing (bash's `/dev/tcp`) and checks that the
+  endpoint answers again within 8 s and that `SIGTERM` still stops the relay within 6 s.
 - **Bonded input is simulated.** ffmpeg cannot open a socket group, so
   `tests/e2e/bonded_caller.c` does: a small libsrt caller that reads MPEG-TS from
   stdin and sends it as a broadcast group (or a main/backup one, `--type backup
