@@ -7,7 +7,7 @@ Goryu is an SRT relay that accepts a publisher's connection, bonded or plain, on
 ### Streams and sessions
 
 **Publisher**:
-The SRT caller that sends a stream to Goryu, over one plain connection or a bonded group.
+The SRT caller that sends a stream to Goryu, over one plain connection or a bonded group. It is usually an encoder, and the docs use "encoder" for the same thing; "publisher" is the role, and the word in the log lines.
 _Avoid_: sender, source
 
 **Streamid**:
