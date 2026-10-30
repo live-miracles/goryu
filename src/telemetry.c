@@ -3,44 +3,68 @@
 #include <math.h>
 #include <string.h>
 
-/* libsrt can expose an uninitialized ~1e16 ms value for this statistic after
- * packet loss. A live SRT packet cannot be belated by anything remotely close
- * to this; keep a conservative upper bound at the relay API boundary. */
-#define MAX_REASONABLE_BELATED_AVG_MS 1000000000.0
-
-static int valid_belated_avg_ms(double value) {
-    return isfinite(value) && value >= 0.0 && value <= MAX_REASONABLE_BELATED_AVG_MS;
+int rtt_reportable(double rtt_ms) {
+    return rtt_ms > 0.0;
 }
 
-/* A leg as reported: its own counters, each with the rule for when to show it. */
-static void report_leg(relay_leg_state_t *out, const leg_reading_t *in) {
-    memset(out, 0, sizeof *out);
-    memcpy(out->ip, in->ip, sizeof out->ip);
-    out->ip[sizeof out->ip - 1] = '\0';
-    out->port = in->port;
-    out->member_state = in->state;
-    out->stats_valid = in->have_counters;
-    if (!in->have_counters) return;
+int latency_reportable(int latency_ms) {
+    return latency_ms > 0;
+}
 
-    const srt_counters_t *c = &in->counters;
-    /* tsbpd_delay_ms is the same negotiated latency SRTO_LATENCY reports. */
-    out->latency_valid = c->tsbpd_delay_ms > 0;
-    out->latency_ms = c->tsbpd_delay_ms;
-    out->rtt_ms = c->rtt_ms;
-    out->rtt_valid = c->rtt_ms > 0.0;
-    out->recv_packets_total = c->recv_total;
-    out->recv_unique_packets_total = c->recv_unique_total;
-    out->recv_loss_total = c->recv_loss_total;
-    out->recv_drop_total = c->recv_drop_total;
-    out->retrans_total = c->recv_retrans_total;
-    out->bandwidth_mbps = c->bandwidth_mbps;
-    out->recv_rate_mbps = c->recv_rate_mbps;
-    out->belated_total = c->belated_total;
-    out->belated_avg_ms = c->belated_avg_ms;
-    out->belated_avg_valid = valid_belated_avg_ms(c->belated_avg_ms);
-    out->undecrypt_total = c->undecrypt_total;
-    out->reorder_distance = c->reorder_distance;
-    out->rcv_buf_ms = c->rcv_buf_ms;
+/* A live SRT packet cannot be belated by anything remotely close to this; keep a
+ * conservative upper bound at the relay API boundary. */
+#define MAX_REASONABLE_BELATED_AVG_MS 1000000000.0
+
+int belated_avg_reportable(double belated_avg_ms) {
+    return isfinite(belated_avg_ms) && belated_avg_ms >= 0.0 &&
+           belated_avg_ms <= MAX_REASONABLE_BELATED_AVG_MS;
+}
+
+int input_recv_total_reportable(const relay_stream_state_t *st) {
+    if (st->input_kind == INPUT_UNREAD) return 0;
+    /* A group's total can read 0 while its unique count does not: that 0 is not a count. */
+    return !(st->input_kind == INPUT_GROUP && st->input.recv_total == 0 &&
+             st->input.recv_unique_total > 0);
+}
+
+int input_loss_retrans_reportable(const relay_stream_state_t *st) {
+    return st->input_kind == INPUT_PLAIN;
+}
+
+int input_extra_reportable(const relay_stream_state_t *st) {
+    return st->input_kind == INPUT_PLAIN && st->input_read_ok;
+}
+
+int input_belated_avg_reportable(const relay_stream_state_t *st) {
+    return input_extra_reportable(st) && belated_avg_reportable(st->input.belated_avg_ms);
+}
+
+int leg_counters_reportable(const leg_reading_t *leg) {
+    return leg->have_counters;
+}
+
+int leg_rtt_reportable(const leg_reading_t *leg) {
+    return leg->have_counters && rtt_reportable(leg->counters.rtt_ms);
+}
+
+int leg_latency_reportable(const leg_reading_t *leg) {
+    return leg->have_counters && latency_reportable(leg->counters.tsbpd_delay_ms);
+}
+
+int leg_belated_avg_reportable(const leg_reading_t *leg) {
+    return leg->have_counters && belated_avg_reportable(leg->counters.belated_avg_ms);
+}
+
+int output_extra_reportable(const relay_stream_state_t *st) {
+    return st->have_output_counters;
+}
+
+int output_rtt_reportable(const relay_stream_state_t *st) {
+    return st->have_output_counters && rtt_reportable(st->output.rtt_ms);
+}
+
+int output_latency_reportable(const relay_stream_state_t *st) {
+    return st->have_output_counters && latency_reportable(st->output.tsbpd_delay_ms);
 }
 
 static int leg_listed(const relay_leg_ref_t *list, int n, const char *ip, int port) {
@@ -53,8 +77,8 @@ static int leg_listed(const relay_leg_ref_t *list, int n, const char *ip, int po
 /* Compares the legs of this reading with the last logged set, records the new set,
  * and returns the changes the limiter lets through. A leg that reconnects from a new
  * port is a left and a joined. */
-static int collect_leg_events(relay_stream_state_t *st, const relay_leg_state_t *legs,
-                              int leg_count, long long now, leg_event_t *events) {
+static int collect_leg_events(relay_stream_state_t *st, const leg_reading_t *legs, int leg_count,
+                              long long now, leg_event_t *events) {
     relay_leg_ref_t now_set[MAX_GROUP_MEMBERS];
     for (int i = 0; i < leg_count; ++i) {
         memcpy(now_set[i].ip, legs[i].ip, sizeof now_set[i].ip);
@@ -92,89 +116,53 @@ static int collect_leg_events(relay_stream_state_t *st, const relay_leg_state_t 
 void telemetry_apply(relay_stream_state_t *st, const stats_sample_t *sample,
                      telemetry_result_t *result) {
     const srt_counters_t *in = &sample->in;
-    const srt_counters_t *out = &sample->out;
     const int is_group = sample->is_group;
     const int have_in = sample->have_in;
 
-    relay_leg_state_t legs[MAX_GROUP_MEMBERS];
+    leg_reading_t legs[MAX_GROUP_MEMBERS];
     int leg_count = sample->leg_count;
     for (int i = 0; i < leg_count; ++i) {
-        report_leg(&legs[i], &sample->legs[i]);
+        legs[i] = sample->legs[i];
+        legs[i].ip[sizeof legs[i].ip - 1] = '\0';
+        /* A reading that failed has no figures, whatever the buffer held. */
+        if (!legs[i].have_counters) memset(&legs[i].counters, 0, sizeof legs[i].counters);
     }
 
     /* The input's negotiated latency. A plain input has it in its own counters.
      * CUDTGroup::bstatsSocket() never fills in msRcvTsbPdDelay for a group, so the
      * group's latency is the largest one that any of its legs reported. */
-    int have_in_latency = 0;
     int in_latency_ms = 0;
     if (!is_group) {
-        have_in_latency = have_in && in->tsbpd_delay_ms > 0;
-        in_latency_ms = in->tsbpd_delay_ms;
+        if (have_in && latency_reportable(in->tsbpd_delay_ms)) in_latency_ms = in->tsbpd_delay_ms;
     } else {
         for (int i = 0; i < leg_count; ++i) {
-            if (!legs[i].latency_valid) continue;
-            have_in_latency = 1;
-            in_latency_ms = max_int(in_latency_ms, legs[i].latency_ms);
+            if (!legs[i].have_counters || !latency_reportable(legs[i].counters.tsbpd_delay_ms))
+                continue;
+            in_latency_ms = max_int(in_latency_ms, legs[i].counters.tsbpd_delay_ms);
         }
     }
+    if (sample->can_read_in) st->input_latency_ms = in_latency_ms;
 
-    if (sample->can_read_in) {
-        st->input_latency_valid = have_in_latency;
-        if (have_in_latency) st->input_latency_ms = in_latency_ms;
-    }
-
-    /* bandwidth, receive rate, belated, undecrypt, reorder and buffer are only
-     * meaningful for a non-bonded input: CUDTGroup::bstatsSocket() never populates
-     * them for a group socket, so they would otherwise silently read 0. */
-    st->input_extra_stats_valid = have_in && !is_group;
-    st->input_belated_avg_valid =
-        st->input_extra_stats_valid && valid_belated_avg_ms(in->belated_avg_ms);
-    if (st->input_extra_stats_valid) {
-        st->input_bandwidth_mbps = in->bandwidth_mbps;
-        st->input_recv_rate_mbps = in->recv_rate_mbps;
-        st->input_belated_total = in->belated_total;
-        st->input_belated_avg_ms = in->belated_avg_ms;
-        st->input_undecrypt_total = in->undecrypt_total;
-        st->input_reorder_distance = in->reorder_distance;
-        st->input_rcv_buf_ms = in->rcv_buf_ms;
-    }
+    st->input_read_ok = have_in;
     if (have_in) {
-        st->input_rtt_ms = in->rtt_ms;
-        st->input_rtt_valid = in->rtt_ms > 0.0;
-        st->recv_packets_total_valid =
-            !(is_group && in->recv_total == 0 && in->recv_unique_total > 0);
-        /* SRT group sockets only expose unique receive and group-drop statistics.
-         * Loss and retransmission are meaningful per member socket, but there is no
-         * deduplicated group equivalent. */
-        st->recv_loss_total_valid = !is_group;
-        st->retrans_total_valid = !is_group;
-        st->recv_packets_total = max_ll(st->recv_packets_total, in->recv_total);
-        st->recv_unique_packets_total =
-            max_ll(st->recv_unique_packets_total, in->recv_unique_total);
-        st->recv_loss_total = max_int(st->recv_loss_total, in->recv_loss_total);
-        st->recv_drop_total = max_int(st->recv_drop_total, in->recv_drop_total);
-        st->retrans_total = max_int(st->retrans_total, in->recv_retrans_total);
+        srt_counters_t held = *in;
+        /* The totals only ever move forward (max of old and new), so a reading taken
+         * just after a leg dropped out cannot make one go backwards. */
+        held.recv_total = max_ll(st->input.recv_total, in->recv_total);
+        held.recv_unique_total = max_ll(st->input.recv_unique_total, in->recv_unique_total);
+        held.recv_loss_total = max_int(st->input.recv_loss_total, in->recv_loss_total);
+        held.recv_drop_total = max_int(st->input.recv_drop_total, in->recv_drop_total);
+        held.recv_retrans_total = max_int(st->input.recv_retrans_total, in->recv_retrans_total);
+        st->input = held;
+        st->input_kind = is_group ? INPUT_GROUP : INPUT_PLAIN;
     }
     if (sample->have_out) {
-        st->output_latency_valid = out->tsbpd_delay_ms > 0;
-        st->output_latency_ms = out->tsbpd_delay_ms;
-        st->output_rtt_ms = out->rtt_ms;
-        st->output_rtt_valid = out->rtt_ms > 0.0;
-        st->output_extra_stats_valid = 1;
-        st->output_sent_packets_total = out->sent_total;
-        st->output_send_loss_total = out->send_loss_total;
-        st->output_send_drop_total = out->send_drop_total;
-        st->output_retrans_total = out->send_retrans_total;
-        st->output_bandwidth_mbps = out->bandwidth_mbps;
-        st->output_send_rate_mbps = out->send_rate_mbps;
-        st->output_undecrypt_total = out->undecrypt_total;
-        st->output_snd_buf_ms = out->snd_buf_ms;
+        st->output = sample->out;
+        st->have_output_counters = 1;
     }
 
     st->leg_count = leg_count;
-    for (int i = 0; i < leg_count; ++i) {
-        st->legs[i] = legs[i];
-    }
+    memcpy(st->legs, legs, sizeof(leg_reading_t) * (size_t)leg_count);
     st->last_stats_at_ms = sample->taken_at_ms;
 
     result->event_count = 0;

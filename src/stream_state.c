@@ -114,11 +114,7 @@ void set_stream_output_connected(int slot, int connected) {
     relay_stream_state_t *st = stream_in(slot);
     if (st) {
         st->output_connected = connected;
-        if (!connected) {
-            st->output_rtt_valid = 0;
-            st->output_latency_valid = 0;
-            st->output_extra_stats_valid = 0;
-        }
+        if (!connected) st->have_output_counters = 0;
     }
     // Deliberately leave last_error/last_error_at_ms in place on reconnect: a
     // status poller can easily land after a fast reconnect already cleared it,

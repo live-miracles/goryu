@@ -40,61 +40,49 @@ static relay_stream_state_t *add_plain(int slot, const char *streamid) {
     p->last_input_packet_at_ms = 4;
     snprintf(p->input_peer_ip, sizeof p->input_peer_ip, "10.0.1.20");
     p->input_peer_port = 40000;
-    p->recv_packets_total_valid = 1;
-    p->recv_packets_total = 100;
-    p->recv_unique_packets_total = 99;
-    p->recv_loss_total_valid = 1;
-    p->recv_loss_total = 1;
-    p->retrans_total_valid = 1;
-    p->retrans_total = 2;
-    p->input_rtt_valid = 1;
-    p->input_rtt_ms = 1.25;
-    p->input_latency_valid = 1;
+    p->input_kind = INPUT_PLAIN;
+    p->input_read_ok = 1;
+    p->input.recv_total = 100;
+    p->input.recv_unique_total = 99;
+    p->input.recv_loss_total = 1;
+    p->input.recv_retrans_total = 2;
+    p->input.rtt_ms = 1.25;
     p->input_latency_ms = 240;
-    p->input_extra_stats_valid = 1;
-    p->input_bandwidth_mbps = 20.5;
-    p->input_recv_rate_mbps = 4.0;
-    p->input_belated_total = 3;
-    p->input_belated_avg_valid = 1;
-    p->input_belated_avg_ms = 12.5;
-    p->input_reorder_distance = 4;
-    p->input_rcv_buf_ms = 90;
-    p->output_extra_stats_valid = 1;
-    p->output_sent_packets_total = 100;
-    p->output_rtt_valid = 1;
-    p->output_rtt_ms = 0.5;
-    p->output_latency_valid = 1;
-    p->output_latency_ms = 200;
-    p->output_bandwidth_mbps = 30;
-    p->output_send_rate_mbps = 4;
-    p->output_snd_buf_ms = 70;
+    p->input.bandwidth_mbps = 20.5;
+    p->input.recv_rate_mbps = 4.0;
+    p->input.belated_total = 3;
+    p->input.belated_avg_ms = 12.5;
+    p->input.reorder_distance = 4;
+    p->input.rcv_buf_ms = 90;
+    p->have_output_counters = 1;
+    p->output.sent_total = 100;
+    p->output.rtt_ms = 0.5;
+    p->output.tsbpd_delay_ms = 200;
+    p->output.bandwidth_mbps = 30;
+    p->output.send_rate_mbps = 4;
+    p->output.snd_buf_ms = 70;
     return p;
 }
 
-/* A bonded input as telemetry.c leaves it: the socket-only counters are not valid. */
+/* A bonded input as telemetry.c leaves it: a group socket does not fill in the
+ * socket-only counters, and its own rtt reads 0. */
 static relay_stream_state_t *add_bonded(int slot, const char *streamid) {
     relay_stream_state_t *p = add_plain(slot, streamid);
     p->input_bonded = 1;
     p->input_peer_ip[0] = '\0';
-    p->recv_loss_total_valid = 0;
-    p->retrans_total_valid = 0;
-    p->input_rtt_valid = 0;
-    p->input_extra_stats_valid = 0;
-    p->input_belated_avg_valid = 0;
+    p->input_kind = INPUT_GROUP;
+    p->input.rtt_ms = 0.0;
     p->leg_count = 2;
     for (int i = 0; i < 2; ++i) {
-        relay_leg_state_t *leg = &p->legs[i];
+        leg_reading_t *leg = &p->legs[i];
         snprintf(leg->ip, sizeof leg->ip, "127.0.0.%d", i + 1);
         leg->port = 40001 + i;
-        leg->member_state = i == 0 ? LEG_MEMBER_RUNNING : LEG_MEMBER_IDLE;
-        leg->stats_valid = 1;
-        leg->recv_packets_total = 50 + i;
-        leg->rtt_valid = 1;
-        leg->rtt_ms = 2.0;
-        leg->latency_valid = 1;
-        leg->latency_ms = 300;
-        leg->belated_avg_valid = 1;
-        leg->belated_avg_ms = 1.0;
+        leg->state = i == 0 ? LEG_MEMBER_RUNNING : LEG_MEMBER_IDLE;
+        leg->have_counters = 1;
+        leg->counters.recv_total = 50 + i;
+        leg->counters.rtt_ms = 2.0;
+        leg->counters.tsbpd_delay_ms = 300;
+        leg->counters.belated_avg_ms = 1.0;
     }
     return p;
 }
@@ -199,10 +187,7 @@ static void test_a_leg_that_is_gone_is_not_listed(void) {
 static void test_a_leg_without_statistics_has_null_numbers(void) {
     reset();
     relay_stream_state_t *p = add_bonded(0, "cam/bonded");
-    p->legs[1].stats_valid = 0;
-    p->legs[1].rtt_valid = 0;
-    p->legs[1].latency_valid = 0;
-    p->legs[1].belated_avg_valid = 0;
+    p->legs[1].have_counters = 0;
     char *json = render("");
     const char *second = strstr(json, "{\"ip\":\"127.0.0.2\"");
     CHECK(second != NULL);
@@ -220,11 +205,11 @@ static void test_a_leg_without_statistics_has_null_numbers(void) {
     free(json);
 }
 
-/* belatedAvgMs has its own flag: a garbage average is null while the rest are numbers. */
+/* belatedAvgMs has its own rule: a garbage average is null while the rest are numbers. */
 static void test_belated_average_is_null_on_its_own(void) {
     reset();
     relay_stream_state_t *p = add_plain(0, "cam/plain");
-    p->input_belated_avg_valid = 0;
+    p->input.belated_avg_ms = 1e16; /* what libsrt can leave there after loss */
     char *json = render("");
     CHECK(contains(json, "\"belatedTotal\":3,\"belatedAvgMs\":null,\"undecryptTotal\":0"));
     free(json);
@@ -233,9 +218,7 @@ static void test_belated_average_is_null_on_its_own(void) {
 static void test_the_output_is_null_until_it_has_been_read(void) {
     reset();
     relay_stream_state_t *p = add_plain(0, "cam/plain");
-    p->output_extra_stats_valid = 0;
-    p->output_rtt_valid = 0;
-    p->output_latency_valid = 0;
+    p->have_output_counters = 0;
     char *json = render("");
     CHECK(contains(json, "\"output\":{\"sentPacketsTotal\":100,\"sendLossTotal\":0,"
                          "\"sendDropTotal\":0,\"retransTotal\":0,\"rttMs\":null,\"latencyMs\":null,"
@@ -284,13 +267,13 @@ static void test_text_is_escaped(void) {
     free(json);
 }
 
-static void test_retry_failures_and_member_states(void) {
+static void test_retry_failures_and_states(void) {
     reset();
     relay_stream_state_t *p = add_bonded(0, "cam/bonded");
     p->retry_failures = 3;
     p->output_connected = 0;
-    p->legs[0].member_state = LEG_MEMBER_PENDING;
-    p->legs[1].member_state = LEG_MEMBER_UNKNOWN;
+    p->legs[0].state = LEG_MEMBER_PENDING;
+    p->legs[1].state = LEG_MEMBER_UNKNOWN;
     char *json = render("");
     CHECK(contains(json, "\"outputConnected\":false,\"retryFailures\":3,"));
     CHECK(contains(json, "\"state\":\"pending\""));
@@ -312,7 +295,7 @@ int main(void) {
     test_streams_and_active_streams();
     test_a_plain_input_without_an_address_has_a_null_peer();
     test_text_is_escaped();
-    test_retry_failures_and_member_states();
+    test_retry_failures_and_states();
     free(g_states);
     TEST_SUMMARY("status_json");
 }
