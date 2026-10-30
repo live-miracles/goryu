@@ -19,7 +19,7 @@ declare -A SOURCES=(
     [test_backoff_json]="src/backoff.c src/json_out.c src/ratelimit.c"
     [test_timed_send]="src/timed_send.c"
     [test_telemetry]="src/telemetry.c src/ratelimit.c"
-    [test_status_json]="src/status_json.c src/json_out.c"
+    [test_status_json]="src/status_json.c src/json_out.c src/telemetry.c src/ratelimit.c"
     [test_stream_state]="src/stream_state.c src/telemetry.c src/ratelimit.c"
 )
 

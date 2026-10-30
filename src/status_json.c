@@ -2,6 +2,7 @@
 
 #include "json_out.h"
 #include "relay_common.h"
+#include "telemetry.h"
 
 static const char *member_state_str(leg_member_state_t state) {
     switch (state) {
@@ -69,51 +70,55 @@ void status_json_write(FILE *f, const status_snapshot_t *snap) {
             json_int(f, &pf, "port", s->input_peer_port);
             fputc('}', f);
         }
-        json_ll_opt(f, &inf, "recvPacketsTotal", s->recv_packets_total_valid,
-                    s->recv_packets_total);
-        json_ll(f, &inf, "recvUniquePacketsTotal", s->recv_unique_packets_total);
-        json_int_opt(f, &inf, "recvLossTotal", s->recv_loss_total_valid, s->recv_loss_total);
-        json_int(f, &inf, "recvDropTotal", s->recv_drop_total);
-        json_int_opt(f, &inf, "retransTotal", s->retrans_total_valid, s->retrans_total);
-        json_dbl_opt(f, &inf, "rttMs", s->input_rtt_valid, s->input_rtt_ms);
-        json_int_opt(f, &inf, "latencyMs", s->input_latency_valid, s->input_latency_ms);
-        json_dbl_opt(f, &inf, "bandwidthMbps", s->input_extra_stats_valid, s->input_bandwidth_mbps);
-        json_dbl_opt(f, &inf, "recvRateMbps", s->input_extra_stats_valid, s->input_recv_rate_mbps);
-        json_ll_opt(f, &inf, "belatedTotal", s->input_extra_stats_valid, s->input_belated_total);
-        json_dbl_opt(f, &inf, "belatedAvgMs", s->input_belated_avg_valid, s->input_belated_avg_ms);
-        json_int_opt(f, &inf, "undecryptTotal", s->input_extra_stats_valid,
-                     s->input_undecrypt_total);
-        json_int_opt(f, &inf, "reorderDistance", s->input_extra_stats_valid,
-                     s->input_reorder_distance);
-        json_int_opt(f, &inf, "rcvBufMs", s->input_extra_stats_valid, s->input_rcv_buf_ms);
+        const srt_counters_t *in = &s->input;
+        json_ll_opt(f, &inf, "recvPacketsTotal", input_recv_total_reportable(s), in->recv_total);
+        json_ll(f, &inf, "recvUniquePacketsTotal", in->recv_unique_total);
+        json_int_opt(f, &inf, "recvLossTotal", input_loss_retrans_reportable(s),
+                     in->recv_loss_total);
+        json_int(f, &inf, "recvDropTotal", in->recv_drop_total);
+        json_int_opt(f, &inf, "retransTotal", input_loss_retrans_reportable(s),
+                     in->recv_retrans_total);
+        json_dbl_opt(f, &inf, "rttMs", rtt_reportable(in->rtt_ms), in->rtt_ms);
+        json_int_opt(f, &inf, "latencyMs", latency_reportable(s->input_latency_ms),
+                     s->input_latency_ms);
+        int extra = input_extra_reportable(s);
+        json_dbl_opt(f, &inf, "bandwidthMbps", extra, in->bandwidth_mbps);
+        json_dbl_opt(f, &inf, "recvRateMbps", extra, in->recv_rate_mbps);
+        json_ll_opt(f, &inf, "belatedTotal", extra, in->belated_total);
+        json_dbl_opt(f, &inf, "belatedAvgMs", input_belated_avg_reportable(s), in->belated_avg_ms);
+        json_int_opt(f, &inf, "undecryptTotal", extra, in->undecrypt_total);
+        json_int_opt(f, &inf, "reorderDistance", extra, in->reorder_distance);
+        json_int_opt(f, &inf, "rcvBufMs", extra, in->rcv_buf_ms);
 
         json_key(f, &inf, "legs");
         fputc('[', f);
         int leg_first = 1;
         for (int j = 0; j < s->leg_count; ++j) {
-            const relay_leg_state_t *leg = &s->legs[j];
+            const leg_reading_t *leg = &s->legs[j];
+            const srt_counters_t *c = &leg->counters;
+            int have = leg_counters_reportable(leg);
             fprintf(f, "%s{", leg_first ? "" : ",");
             leg_first = 0;
 
             int lf = 1;
             json_str(f, &lf, "ip", leg->ip);
             json_int(f, &lf, "port", leg->port);
-            json_str(f, &lf, "state", member_state_str(leg->member_state));
-            json_dbl_opt(f, &lf, "rttMs", leg->rtt_valid, leg->rtt_ms);
-            json_int_opt(f, &lf, "latencyMs", leg->latency_valid, leg->latency_ms);
-            json_ll_opt(f, &lf, "recvPacketsTotal", leg->stats_valid, leg->recv_packets_total);
-            json_ll_opt(f, &lf, "recvUniquePacketsTotal", leg->stats_valid,
-                        leg->recv_unique_packets_total);
-            json_int_opt(f, &lf, "recvLossTotal", leg->stats_valid, leg->recv_loss_total);
-            json_int_opt(f, &lf, "recvDropTotal", leg->stats_valid, leg->recv_drop_total);
-            json_int_opt(f, &lf, "retransTotal", leg->stats_valid, leg->retrans_total);
-            json_dbl_opt(f, &lf, "bandwidthMbps", leg->stats_valid, leg->bandwidth_mbps);
-            json_dbl_opt(f, &lf, "recvRateMbps", leg->stats_valid, leg->recv_rate_mbps);
-            json_ll_opt(f, &lf, "belatedTotal", leg->stats_valid, leg->belated_total);
-            json_dbl_opt(f, &lf, "belatedAvgMs", leg->belated_avg_valid, leg->belated_avg_ms);
-            json_int_opt(f, &lf, "undecryptTotal", leg->stats_valid, leg->undecrypt_total);
-            json_int_opt(f, &lf, "reorderDistance", leg->stats_valid, leg->reorder_distance);
-            json_int_opt(f, &lf, "rcvBufMs", leg->stats_valid, leg->rcv_buf_ms);
+            json_str(f, &lf, "state", member_state_str(leg->state));
+            json_dbl_opt(f, &lf, "rttMs", leg_rtt_reportable(leg), c->rtt_ms);
+            json_int_opt(f, &lf, "latencyMs", leg_latency_reportable(leg), c->tsbpd_delay_ms);
+            json_ll_opt(f, &lf, "recvPacketsTotal", have, c->recv_total);
+            json_ll_opt(f, &lf, "recvUniquePacketsTotal", have, c->recv_unique_total);
+            json_int_opt(f, &lf, "recvLossTotal", have, c->recv_loss_total);
+            json_int_opt(f, &lf, "recvDropTotal", have, c->recv_drop_total);
+            json_int_opt(f, &lf, "retransTotal", have, c->recv_retrans_total);
+            json_dbl_opt(f, &lf, "bandwidthMbps", have, c->bandwidth_mbps);
+            json_dbl_opt(f, &lf, "recvRateMbps", have, c->recv_rate_mbps);
+            json_ll_opt(f, &lf, "belatedTotal", have, c->belated_total);
+            json_dbl_opt(f, &lf, "belatedAvgMs", leg_belated_avg_reportable(leg),
+                         c->belated_avg_ms);
+            json_int_opt(f, &lf, "undecryptTotal", have, c->undecrypt_total);
+            json_int_opt(f, &lf, "reorderDistance", have, c->reorder_distance);
+            json_int_opt(f, &lf, "rcvBufMs", have, c->rcv_buf_ms);
             fputc('}', f);
         }
         fputs("]}", f);
@@ -121,19 +126,18 @@ void status_json_write(FILE *f, const status_snapshot_t *snap) {
         json_key(f, &sf, "output");
         fputc('{', f);
         int outf = 1;
-        json_ll(f, &outf, "sentPacketsTotal", s->output_sent_packets_total);
-        json_int(f, &outf, "sendLossTotal", s->output_send_loss_total);
-        json_int(f, &outf, "sendDropTotal", s->output_send_drop_total);
-        json_int(f, &outf, "retransTotal", s->output_retrans_total);
-        json_dbl_opt(f, &outf, "rttMs", s->output_rtt_valid, s->output_rtt_ms);
-        json_int_opt(f, &outf, "latencyMs", s->output_latency_valid, s->output_latency_ms);
-        json_dbl_opt(f, &outf, "bandwidthMbps", s->output_extra_stats_valid,
-                     s->output_bandwidth_mbps);
-        json_dbl_opt(f, &outf, "sendRateMbps", s->output_extra_stats_valid,
-                     s->output_send_rate_mbps);
-        json_int_opt(f, &outf, "undecryptTotal", s->output_extra_stats_valid,
-                     s->output_undecrypt_total);
-        json_int_opt(f, &outf, "sndBufMs", s->output_extra_stats_valid, s->output_snd_buf_ms);
+        const srt_counters_t *out = &s->output;
+        int out_extra = output_extra_reportable(s);
+        json_ll(f, &outf, "sentPacketsTotal", out->sent_total);
+        json_int(f, &outf, "sendLossTotal", out->send_loss_total);
+        json_int(f, &outf, "sendDropTotal", out->send_drop_total);
+        json_int(f, &outf, "retransTotal", out->send_retrans_total);
+        json_dbl_opt(f, &outf, "rttMs", output_rtt_reportable(s), out->rtt_ms);
+        json_int_opt(f, &outf, "latencyMs", output_latency_reportable(s), out->tsbpd_delay_ms);
+        json_dbl_opt(f, &outf, "bandwidthMbps", out_extra, out->bandwidth_mbps);
+        json_dbl_opt(f, &outf, "sendRateMbps", out_extra, out->send_rate_mbps);
+        json_int_opt(f, &outf, "undecryptTotal", out_extra, out->undecrypt_total);
+        json_int_opt(f, &outf, "sndBufMs", out_extra, out->snd_buf_ms);
         fputc('}', f);
 
         json_ll(f, &sf, "lastErrorAt", s->last_error_at_ms);
