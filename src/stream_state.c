@@ -38,7 +38,10 @@ static int collect_leg_events(relay_stream_state_t *st, const relay_leg_state_t 
                               int leg_count, long long now, leg_event_t *events) {
     relay_leg_ref_t now_set[MAX_GROUP_MEMBERS];
     for (int i = 0; i < leg_count; ++i) {
-        snprintf(now_set[i].ip, sizeof now_set[i].ip, "%s", legs[i].ip);
+        /* Both are INET6_ADDRSTRLEN. A bounded %s copy makes gcc warn about a source
+         * it cannot size; copying the whole buffer cannot be truncated. */
+        memcpy(now_set[i].ip, legs[i].ip, sizeof now_set[i].ip);
+        now_set[i].ip[sizeof now_set[i].ip - 1] = '\0';
         now_set[i].port = legs[i].port;
     }
 
