@@ -768,11 +768,25 @@ scenario_long_output_streamid() {
     check "the relay is still alive" kill -0 "$GPID"
 }
 
+# glibc sizes a thread's stack from the stack limit of the process. The status reply
+# used to build its snapshot of the whole session table (about 1.5 MB) on the status
+# thread's stack, so under a 1 MB limit the first status request crashed the relay.
+scenario_status_small_stack() {
+    ports 26
+    write_config "$WORK/c.json" ""
+    (ulimit -s 1024; exec env LD_LIBRARY_PATH="$LIB_DIR" "$BIN" "$WORK/c.json" >"$WORK/g.log" 2>&1) &
+    GPID=$!
+    PIDS+=("$GPID")
+    check "the status endpoint answers under a 1 MB stack limit" wait_for 5 status
+    check "it answers again" status_has '.streamStates | length == 0'
+    check "the relay is still alive" kill -0 "$GPID"
+}
+
 # --- run --------------------------------------------------------------------
 
 ALL=(cli bad_config unknown_key uri_mode output_passphrase forward downstream_down downstream_drops duplicate takeover two_streams passphrase sigterm
     status_idle_client shutdown_silent churn bonded bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
-    bonded_abrupt_end long_output_streamid)
+    bonded_abrupt_end long_output_streamid status_small_stack)
 SELECTED=("${@:-${ALL[@]}}")
 
 for name in "${SELECTED[@]}"; do

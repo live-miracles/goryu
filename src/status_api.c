@@ -40,7 +40,11 @@ static long long g_started_at_ms = 0;
  * (at most one entry per session table slot) so that sending it has one deadline;
  * through stdio on the socket every buffer flush would wait for the client again. */
 static int write_status_response(int client_fd) {
-    relay_stream_state_t states[MAX_ACTIVE_SESSIONS];
+    /* The whole session table, about 1.5 MB: static, not on the stack. A thread's stack
+     * is sized from the process's stack limit, and under a limit of 1 MB the first status
+     * request overflowed it and crashed the relay. Only the status thread calls this, one
+     * client at a time, so the buffer is not shared. */
+    static relay_stream_state_t states[MAX_ACTIVE_SESSIONS];
     char last_error[LAST_ERROR_MAX];
     long long updated_at_ms = wall_ms();
 

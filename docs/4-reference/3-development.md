@@ -51,7 +51,7 @@ a `streamStates` field and the pid of the process it started.
   API response, because the work dir is gone once CI ends. Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
   downstream_drops duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
   bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
-  bonded_abrupt_end unknown_key status_idle_client long_output_streamid`.
+  bonded_abrupt_end unknown_key status_idle_client long_output_streamid status_small_stack`.
 - **Config and status edge cases.** `bad_config` refuses malformed files (a duplicate key,
   a nested object, text after the object, a missing comma) and `unknown_key` checks that a
   misspelled key starts the relay and is named in the log. `status_idle_client` opens a
