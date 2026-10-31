@@ -14,7 +14,7 @@ The local build compiles libsrt 1.5.6 with bonding in Docker and produces
 
 ```bash
 bash scripts/run.sh          # runs ./objs/goryu with ./goryu.json
-bash scripts/format.sh       # format src/ and tests/ (clang-format)
+bash scripts/format.sh       # format src/ and tests/ (clang-format 21)
 bash scripts/format.sh check # check only, as CI does
 bash scripts/test-unit.sh    # unit tests (gcc with sanitizers; no Docker)
 bash scripts/smoke-test.sh   # build, start with goryu.json, check /status
@@ -97,7 +97,7 @@ a `streamStates` field and the pid of the process it started.
 `.github/workflows/ci.yml` runs on every push to `master` or `main` and on pull
 requests:
 
-- **Format check:** `clang-format` over the C sources and tests.
+- **Format check:** `clang-format` over the C sources and tests. The version is pinned (21.1.8, installed with `pipx`) and `scripts/format.sh` refuses another major version, because 18 and 21 format macro braces differently and a mismatch fails CI for code that passes locally.
 - **Unit tests:** `scripts/test-unit.sh`.
 - **Build, smoke and end-to-end tests:** the Docker build, `scripts/smoke-test.sh`,
   then `scripts/test-e2e.sh`.
