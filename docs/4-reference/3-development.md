@@ -48,7 +48,9 @@ a `streamStates` field and the pid of the process it started.
   `jq` and `ss` (plus Docker for the bonded caller and the closing sink), and take about three minutes.
   A scenario with a failed check prints the relay's last 40 log lines, the tails of the
   publisher, downstream sink and bonded caller logs, and the status
-  API response, because the work dir is gone once CI ends. Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
+  API response, because the work dir is gone once CI ends. The status response is also
+  printed at the scenario's first failed check, since by the end the session is gone and
+  a race (a bonded leg still joining) is no longer visible. Pass scenario names to run some: `cli bad_config uri_mode forward downstream_down
   downstream_drops duplicate takeover two_streams passphrase sigterm shutdown_silent churn bonded
   bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
   bonded_abrupt_end unknown_key status_idle_client long_output_streamid status_small_stack`.

@@ -51,6 +51,14 @@ check() { # check <description> <command...>
         PASS=$((PASS + 1)); echo "  PASS  $desc"
     else
         FAIL=$((FAIL + 1)); FAILED+=("$CURRENT: $desc"); echo "  FAIL  $desc"
+        # The end-of-scenario dump comes after the session is gone, so the state a check saw
+        # (a bonded leg still joining, say) is only visible here. The first failure is the
+        # informative one; the later ones usually follow from it.
+        if [[ -z "${SNAPSHOT_TAKEN:-}" ]]; then
+            SNAPSHOT_TAKEN=1
+            echo "  --- status when this check failed"
+            { status 2>/dev/null | jq -c . 2>/dev/null | cut -c1-2000 | sed 's/^/  | /'; } || true
+        fi
     fi
 }
 
@@ -805,6 +813,7 @@ for name in "${SELECTED[@]}"; do
     echo "== $name"
     : >"$WORK/sink.log"; : >"$WORK/pub.log"; : >"$WORK/bonded.log"
     failed_before=$FAIL
+    SNAPSHOT_TAKEN=
     "scenario_$name"
     if ((FAIL > failed_before)); then
         # A check that failed in CI leaves nothing else behind: the work dir is removed on exit.
