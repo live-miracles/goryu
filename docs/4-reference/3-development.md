@@ -36,7 +36,8 @@ a `streamStates` field and the pid of the process it started.
   table (its log and clocks stubbed), the two clocks (monotonic and wall), a session's place in the relay (the tracker: the
   duplicate wait, takeover and release against a fake clock and a recorded `srt_close`,
   built with a stand-in `srt/srt.h` from `tests/unit/fake/`), a session's connection to
-  the downstream (the output: connect, the whole retry schedule and the healthy period
+  its publisher (the input: the streamid and its fallback, and how a receive failure is
+  told) and to the downstream (the output: connect, the whole retry schedule and the healthy period
   over a scripted transport and the same fake clock), and the command line (every
   way it is refused). Each test is built with the release's `gcc -Wall -Wextra` plus `-Werror`,
   under AddressSanitizer and UndefinedBehaviorSanitizer. A new check

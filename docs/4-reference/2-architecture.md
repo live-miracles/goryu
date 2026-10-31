@@ -21,7 +21,8 @@ small modules listed [below](#modules). It has three kinds of thread.
 |---|---|
 | `goryu.c` | Entry point: the listener, the accept loop, shutdown order |
 | `relay_options.c` | The command line (a config file or two URIs) and the status port variable, turned into one options struct. Pure |
-| `session.c` | One session thread: streamid, [duplicate publishers](../3-operations/1-reliability.md#duplicate-publishers), the read/send loop |
+| `session.c` | One session thread: the order a session lives in (open the input, claim the stream, connect the output, the read/send loop, release) |
+| `input.c`, `srt_input.c` | A session's connection to the publisher: its streamid (the connection's, else the downstream URI's), bonded or plain, the receive and what it comes to (data, idle, closed, failed), and where a failure is told. `input.c` runs without libsrt through a small transport; `srt_input.c` is the libsrt one, where libsrt's error codes are sorted ([ADR 0017](../adr/0017-the-input-owns-the-publisher-connection.md)) |
 | `output.c`, `srt_output.c` | A session's connection to the downstream: connect, [retry](../3-operations/1-reliability.md#downstream-retry) after every failed connect or send, the healthy period, and keeping the tracker and the stream's telemetry in step. `output.c` runs without libsrt through a small transport; `srt_output.c` is the libsrt one ([ADR 0016](../adr/0016-the-output-owns-the-downstream-connection.md)) |
 | `tracker.c` | A session's place in the relay: its slot, its sockets (so one thread can close another's and the sampler never reads a closed socket), the streamid it holds, the duplicate-publisher wait and takeover, and the one release every session ends with |
 | `stream_state.c` | The shared, mutex-protected telemetry per stream, at the session's slot (begun and ended by the tracker); the process-level `lastError` |

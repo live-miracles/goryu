@@ -2,8 +2,8 @@
 # Unit tests for the modules that do not need libsrt: config and URI parsing,
 # the command line, the retry backoff, the status JSON, the telemetry rules, the stream
 # state table, a session's place in the relay (the tracker, against a fake clock and a
-# recorded srt_close), a session's connection to the downstream (scripted transport,
-# fake clock), the two clocks and the deadline-bound send. Needs only gcc.
+# recorded srt_close), a session's connection to its publisher and to the downstream
+# (scripted transports, fake clock), the two clocks and the deadline-bound send. Needs only gcc.
 #
 # Built like the release (gcc, -Wall -Wextra, here with -Werror) under
 # AddressSanitizer and UndefinedBehaviorSanitizer.
@@ -28,6 +28,7 @@ declare -A SOURCES=(
     [test_status_json]="src/status_json.c src/json_out.c src/telemetry.c src/ratelimit.c"
     [test_stream_state]="src/stream_state.c src/telemetry.c src/ratelimit.c"
     [test_tracker]="src/tracker.c src/stream_state.c src/telemetry.c src/ratelimit.c"
+    [test_input]="src/input.c src/tracker.c src/stream_state.c src/telemetry.c src/ratelimit.c"
     [test_output]="src/output.c src/backoff.c src/tracker.c src/stream_state.c src/telemetry.c src/ratelimit.c src/net.c"
 )
 

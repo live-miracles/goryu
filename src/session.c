@@ -7,25 +7,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "input.h"
 #include "log.h"
 #include "net.h"
 #include "output.h"
 #include "relay_common.h"
 #include "relay_config.h"
 #include "runtime.h"
+#include "srt_input.h"
 #include "srt_output.h"
 #include "stats.h"
 #include "stream_state.h"
 #include "tracker.h"
 
 #define CHUNK 1456
-/* How long srt_recvmsg2 may block without data. A session whose publisher goes
- * silent would otherwise sit in the call indefinitely, and srt_close() from
- * another thread (duplicate takeover) does not wake a blocked receive on a bonded
- * group: libsrt defers closing a group that is in use. Waking once a second lets
- * the session notice that it was closed. */
-#define RECV_TIMEOUT_MS 1000
-
 typedef struct session_args {
     SRTSOCKET conn;
     const output_target_t *target;
@@ -41,27 +36,11 @@ typedef struct session {
     /* This session's slot: its sockets and streamid are in the tracker's table and, once
      * it holds a stream, its telemetry is at the same index in the stream state's. */
     int slot;
-    char streamid[1024];
     char peer_ip[INET6_ADDRSTRLEN];
     int peer_port;
+    input_t input;   /* the connection to the publisher */
     output_t output; /* the connection to the downstream */
 } session_t;
-
-static int stream_input_still_connected(SRTSOCKET conn) {
-    SRT_SOCKSTATUS st = srt_getsockstate(conn);
-    return st == SRTS_CONNECTED || st == SRTS_LISTENING || st == SRTS_CONNECTING;
-}
-
-static int get_streamid(SRTSOCKET sock, char *sid, size_t sid_sz) {
-    if (sid_sz == 0) return 0;
-    sid[0] = '\0';
-    int sid_len = (int)sid_sz - 1;
-    if (srt_getsockflag(sock, SRTO_STREAMID, sid, &sid_len) == SRT_ERROR) return 0;
-    if (sid_len < 0) sid_len = 0;
-    if ((size_t)sid_len >= sid_sz) sid_len = (int)sid_sz - 1;
-    sid[sid_len] = '\0';
-    return sid_len > 0;
-}
 
 /* ---- the session ---- */
 
@@ -80,63 +59,45 @@ static void *session_main(void *arg) {
     long long packets_forwarded = 0;
     const char *close_reason = "input_disconnected";
 
-    if (!get_streamid(conn, s.streamid, sizeof s.streamid)) {
-        if (!get_param(s.target->out_query, "streamid", s.streamid, sizeof s.streamid)) {
-            s.streamid[0] = '\0';
-        }
+    /* A publisher that sets no streamid gets the one in the downstream URI. */
+    char default_streamid[1024];
+    if (!get_param(s.target->out_query, "streamid", default_streamid, sizeof default_streamid)) {
+        default_streamid[0] = '\0';
     }
+    input_open(&s.input, &srt_input_transport, conn, s.slot, s.peer_ip, s.peer_port,
+               default_streamid);
 
-    int input_bonded = (conn & SRTGROUP_MASK) != 0;
-    int recv_timeout_ms = RECV_TIMEOUT_MS;
-    if (srt_setsockflag(conn, SRTO_RCVTIMEO, &recv_timeout_ms, sizeof recv_timeout_ms) ==
-        SRT_ERROR) {
-        relay_logf("SRTO_RCVTIMEO rejected for peer=%s:%d: %s\n", s.peer_ip, s.peer_port,
-                   srt_getlasterror_str());
-    }
-    relay_logf("Accepted %s SRT source peer=%s:%d streamid=%s\n", input_bonded ? "bonded" : "plain",
-               s.peer_ip, s.peer_port, streamid_or_empty(s.streamid));
-
-    if (tracker_acquire_stream(s.slot, s.streamid) != 0) {
+    if (tracker_acquire_stream(s.slot, s.input.streamid) != 0) {
         tracker_release(s.slot, conn);
         return NULL;
     }
 
-    set_stream_input_info(s.slot, input_bonded, s.peer_ip, s.peer_port);
-    output_init(&s.output, &srt_output_transport, s.target, s.slot, s.streamid, s.peer_ip,
+    set_stream_input_info(s.slot, s.input.bonded, s.peer_ip, s.peer_port);
+    output_init(&s.output, &srt_output_transport, s.target, s.slot, s.input.streamid, s.peer_ip,
                 s.peer_port);
     output_service(&s.output);
 
     char buf[CHUNK];
-    while (relay_running() && stream_input_still_connected(conn)) {
+    while (relay_running() && input_connected(&s.input)) {
         output_service(&s.output);
 
-        SRT_MSGCTRL mc = srt_msgctrl_default;
-        int r = srt_recvmsg2(conn, buf, CHUNK, &mc);
-        if (r == SRT_ERROR) {
-            int err = srt_getlasterror(NULL);
-            /* No data within RECV_TIMEOUT_MS (libsrt reports it as EASYNCRCV): go round
-             * again so the loop conditions are re-checked. */
-            if (err == SRT_EASYNCRCV || err == SRT_ETIMEOUT) {
-                update_stream_srt_counters(s.slot, conn, output_socket(&s.output), 0);
-                continue;
-            }
-            if (err != SRT_ECONNLOST && err != SRT_ENOCONN) {
-                close_reason = "input_error";
-                set_last_errorf("srt_recvmsg2: %s", srt_getlasterror_str());
-                set_stream_errorf(s.slot, "Input error from peer %s:%d: %s", s.peer_ip, s.peer_port,
-                                  srt_getlasterror_str());
-                relay_logf("srt_recvmsg2 failed peer=%s:%d streamid=%s error=\"%s\"\n", s.peer_ip,
-                           s.peer_port, streamid_or_empty(s.streamid), srt_getlasterror_str());
-            }
+        int len = 0;
+        input_result_t got = input_recv(&s.input, buf, CHUNK, &len);
+        if (got == INPUT_IDLE) {
+            /* Go round again so the loop conditions are re-checked. */
+            update_stream_srt_counters(s.slot, conn, output_socket(&s.output), 0);
+            continue;
+        }
+        if (got != INPUT_DATA) {
+            if (got == INPUT_FAILED) close_reason = "input_error";
             break;
         }
-        if (r <= 0) continue;
         record_stream_input_progress(s.slot);
         update_stream_srt_counters(s.slot, conn, output_socket(&s.output), 0);
 
-        if (output_send(&s.output, buf, r) == OUTPUT_SENT) {
-            record_stream_forward_progress(s.slot, r);
-            bytes_forwarded += r;
+        if (output_send(&s.output, buf, len) == OUTPUT_SENT) {
+            record_stream_forward_progress(s.slot, len);
+            bytes_forwarded += len;
             packets_forwarded++;
         }
     }
@@ -146,7 +107,7 @@ static void *session_main(void *arg) {
     output_close(&s.output);
     relay_logf("Connection closed peer=%s:%d streamid=%s reason=%s duration_ms=%lld "
                "bytes_forwarded=%lld packets_forwarded=%lld\n",
-               s.peer_ip, s.peer_port, streamid_or_empty(s.streamid), close_reason,
+               s.peer_ip, s.peer_port, streamid_or_empty(s.input.streamid), close_reason,
                now_ms() - started_at_ms, bytes_forwarded, packets_forwarded);
 
     tracker_release(s.slot, conn);

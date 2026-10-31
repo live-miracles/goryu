@@ -42,3 +42,4 @@ Why Goryu is built the way it is; each record names the alternatives that were r
 - [0014 Telemetry rules are pure and libsrt is read in one place](adr/0014-telemetry-rules-are-pure-and-libsrt-is-read-in-one-place.md)
 - [0015 The tracker decides who holds a streamid, and one release ends a session](adr/0015-the-tracker-decides-who-holds-a-streamid.md)
 - [0016 The output owns the downstream connection](adr/0016-the-output-owns-the-downstream-connection.md)
+- [0017 The input owns the publisher connection](adr/0017-the-input-owns-the-publisher-connection.md)
