@@ -33,7 +33,7 @@ a `streamStates` field and the pid of the process it started.
   URI parsing, the passphrase rules and redaction, the retry backoff, the JSON
   writers, the deadline-bound send (over a socketpair), the telemetry rules (a libsrt
   reading is a struct), the status JSON with every null rule, the stream state
-  table (its log and clock stubbed), a session's place in the relay (the tracker: the
+  table (its log and clocks stubbed), the two clocks (monotonic and wall), a session's place in the relay (the tracker: the
   duplicate wait, takeover and release against a fake clock and a recorded `srt_close`,
   built with a stand-in `srt/srt.h` from `tests/unit/fake/`), a session's connection to
   the downstream (the output: connect, the whole retry schedule and the healthy period

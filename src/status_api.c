@@ -42,7 +42,7 @@ static long long g_started_at_ms = 0;
 static int write_status_response(int client_fd) {
     relay_stream_state_t states[MAX_ACTIVE_SESSIONS];
     char last_error[LAST_ERROR_MAX];
-    long long updated_at_ms = now_ms();
+    long long updated_at_ms = wall_ms();
 
     stream_state_snapshot(states, last_error, sizeof last_error);
 

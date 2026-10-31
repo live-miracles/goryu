@@ -111,7 +111,8 @@ Navigation only; correct an entry when a change makes it stale.
   `build_srt_uri`, `redact_srt_uri`, URI and query parsing (unit-tested).
 - `src/srt_opts.c` (apply and check SRT options), `net.c` (addresses),
   `log.c` (timestamps, the libsrt log cap), `runtime.c` (run flag, signals,
-  clock), `backoff.c` (retry delays and one session's retry state, unit-tested),
+  the monotonic `now_ms` for every decision, `wall_ms` for status timestamps),
+  `backoff.c` (retry delays and one session's retry state, unit-tested),
   `ratelimit.c` (a window that lets a few events through and counts the rest,
   unit-tested; it bounds the bonded leg join/leave and the status-client log lines and
   libsrt's own log cap), `relay_common.h`

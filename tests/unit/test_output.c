@@ -20,6 +20,9 @@ static long long g_now;
 long long now_ms(void) {
     return g_now;
 }
+long long wall_ms(void) {
+    return g_now + 1700000000000LL;
+}
 int relay_running(void) {
     return 1;
 }

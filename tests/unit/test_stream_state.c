@@ -12,9 +12,15 @@
 
 /* ---- stubs for what stream_state.c takes from log.c and runtime.c ---- */
 
+/* Two clocks, set apart so a test can tell which one the code read: the monotonic one
+ * decides, the wall one is only shown. */
 static long long g_now = 1000;
+static long long g_wall = 1700000000000LL;
 long long now_ms(void) {
     return g_now;
+}
+long long wall_ms(void) {
+    return g_wall;
 }
 
 static char g_log[64][256];
@@ -47,6 +53,7 @@ static void reset(void) {
         stream_state_end(i);
     set_last_errorf("%s", "");
     g_now = 1000;
+    g_wall = 1700000000000LL;
     g_log_count = 0;
 }
 
@@ -56,7 +63,7 @@ static void test_claiming_a_streamid(void) {
     const relay_stream_state_t *st = snapshot(4);
     CHECK_STR(st->streamid, "camera1/main");
     CHECK(st->input_active && !st->output_connected);
-    CHECK(st->last_input_packet_at_ms == 1000);
+    CHECK(st->last_input_packet_at_ms == g_wall);
     CHECK(snapshot(3)->streamid[0] == '\0');
 }
 
@@ -139,6 +146,7 @@ static void test_setters_write_the_claimed_slot(void) {
     reset();
     CHECK(stream_state_begin(3, "cam") == 0);
     g_now = 5000;
+    g_wall += 4000;
     set_stream_errorf(3, "Relay output error to %s:%d", "10.0.0.1", 10080);
     set_stream_output_connected(3, 1);
     set_stream_retry_failures(3, 2);
@@ -149,9 +157,9 @@ static void test_setters_write_the_claimed_slot(void) {
     set_stream_input_info(3, 0, "10.0.1.20", 40000);
     const relay_stream_state_t *st = snapshot(3);
     CHECK_STR(st->last_error, "Relay output error to 10.0.0.1:10080");
-    CHECK(st->last_error_at_ms == 5000);
+    CHECK(st->last_error_at_ms == g_wall);
     CHECK(st->output_connected && st->retry_failures == 2);
-    CHECK(st->last_input_packet_at_ms == 5000 && st->last_packet_at_ms == 5000);
+    CHECK(st->last_input_packet_at_ms == g_wall && st->last_packet_at_ms == g_wall);
     CHECK(st->forwarded_packets == 1 && st->forwarded_bytes == 1316);
     CHECK(!st->input_bonded && st->input_peer_port == 40000);
     CHECK_STR(st->input_peer_ip, "10.0.1.20");
@@ -180,6 +188,24 @@ static void test_input_age_for_the_takeover_decision(void) {
     CHECK(stream_state_input_age_ms(0, 4000, &age) == 0 && age == 500);
     stream_state_end(0);
     CHECK(stream_state_input_age_ms(0, 4000, &age) == -1);
+}
+
+/* The wall clock can be stepped (NTP, a VM resuming), so a decision never reads it: a
+ * step of an hour either way leaves a stream exactly as stale as it was. */
+static void test_staleness_ignores_a_wall_clock_step(void) {
+    reset();
+    long long age = -1;
+    CHECK(stream_state_begin(0, "cam") == 0); /* begun at 1000 */
+    g_now = 3000;
+    g_wall += 3600 * 1000LL;
+    CHECK(stream_state_input_age_ms(0, g_now, &age) == 0 && age == 2000);
+    g_wall -= 7200 * 1000LL;
+    CHECK(stream_state_input_age_ms(0, g_now, &age) == 0 && age == 2000);
+    record_stream_input_progress(0);
+    g_now = 3500;
+    CHECK(stream_state_input_age_ms(0, g_now, &age) == 0 && age == 500);
+    /* what is shown is the wall time of the packet, stepped or not */
+    CHECK(snapshot(0)->last_input_packet_at_ms == g_wall);
 }
 
 static void test_the_process_error_is_kept_apart_from_the_streams(void) {
@@ -303,6 +329,7 @@ int main(void) {
     test_setters_write_the_claimed_slot();
     test_a_bonded_input_stores_no_peer();
     test_input_age_for_the_takeover_decision();
+    test_staleness_ignores_a_wall_clock_step();
     test_the_process_error_is_kept_apart_from_the_streams();
     test_a_snapshot_is_a_copy();
     test_the_sampling_throttle();

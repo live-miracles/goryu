@@ -41,6 +41,15 @@ A second connection with a streamid that is already active waits up to 5 s:
 This lets an encoder that crashed and reconnected recover quickly, without
 letting a second encoder hijack a stream that is still flowing.
 
+## Clock steps
+
+The waits and timers above (the retry backoff, the 10 s healthy period, the 5 s stale
+test, the once-a-second sampling and the log windows) run on the monotonic clock, so
+setting the system clock (an NTP step at boot, a VM resuming) does not delay a retry
+by the length of the step or make a flowing stream look stale. The timestamps in the
+[status API](../4-reference/1-status-api.md) (`startedAtMs`, `updatedAtMs`,
+`lastPacketAt` and the like) are wall clock, so they do step with it.
+
 Each session wakes from its receive once a second (`SRTO_RCVTIMEO`, 1000 ms) even
 when the encoder sends nothing, then re-checks whether it was closed. Up to v3.2.1
 it blocked until data arrived, and that made takeover impossible for a **bonded**

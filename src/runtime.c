@@ -6,10 +6,18 @@
 
 static volatile sig_atomic_t g_running = 1;
 
-long long now_ms(void) {
+static long long clock_ms(clockid_t clock) {
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    clock_gettime(clock, &ts);
     return (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
+}
+
+long long now_ms(void) {
+    return clock_ms(CLOCK_MONOTONIC);
+}
+
+long long wall_ms(void) {
+    return clock_ms(CLOCK_REALTIME);
 }
 
 void sleep_ms(int ms) {

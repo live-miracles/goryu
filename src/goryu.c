@@ -179,7 +179,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    long long started_at_ms = now_ms();
+    long long started_at_ms = wall_ms();
 
     if (relay_install_signal_handlers() != 0) {
         relay_logf("install signal handlers failed: %s\n", strerror(errno));

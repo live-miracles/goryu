@@ -33,7 +33,7 @@ small modules listed [below](#modules). It has three kinds of thread.
 | `srt_opts.c` | Applies SRT options from a query and reports a refused one |
 | `timed_send.c` | Sends a buffer on a socket with one total deadline; the status thread uses it so a client that stops reading cannot hold it |
 | `ratelimit.c` | A fixed window that lets a few events through and counts the rest (used for the leg join/leave log lines, the status client lines and libsrt's own log cap) |
-| `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and clock; the retry delays and one session's retry state |
+| `net.c`, `log.c`, `runtime.c`, `backoff.c` | Address handling; timestamped logging and the libsrt log cap; the run flag, signals and the two clocks (monotonic for every decision, wall only for status timestamps); the retry delays and one session's retry state |
 
 A session has one slot, and it indexes both tables: the tracker's (its sockets) and
 the stream state's (its telemetry). A stream is only ever stored in its own session's

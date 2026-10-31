@@ -78,7 +78,10 @@ typedef struct relay_stream_state {
     int input_active;
     int output_connected;
     int retry_failures;
+    /* The *_at_ms times are wall clock (wall_ms), shown in the status API. Staleness is
+     * decided from last_input_packet_mono_ms (now_ms), which a clock step cannot move. */
     long long last_input_packet_at_ms;
+    long long last_input_packet_mono_ms;
     long long forwarded_packets;
     long long forwarded_bytes;
     long long last_packet_at_ms;

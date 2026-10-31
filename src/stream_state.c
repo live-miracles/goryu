@@ -38,7 +38,7 @@ void set_stream_errorf(int slot, const char *fmt, ...) {
         va_start(ap, fmt);
         vsnprintf(st->last_error, sizeof st->last_error, fmt, ap);
         va_end(ap);
-        st->last_error_at_ms = now_ms();
+        st->last_error_at_ms = wall_ms();
     }
     pthread_mutex_unlock(&g_streams_mu);
 }
@@ -51,7 +51,8 @@ int stream_state_begin(int slot, const char *streamid) {
         memset(&g_streams[slot], 0, sizeof g_streams[slot]);
         snprintf(g_streams[slot].streamid, sizeof g_streams[slot].streamid, "%s", streamid);
         g_streams[slot].input_active = 1;
-        g_streams[slot].last_input_packet_at_ms = now_ms();
+        g_streams[slot].last_input_packet_at_ms = wall_ms();
+        g_streams[slot].last_input_packet_mono_ms = now_ms();
         result = 0;
     }
     pthread_mutex_unlock(&g_streams_mu);
@@ -63,7 +64,7 @@ int stream_state_input_age_ms(int slot, long long now, long long *age_ms) {
     pthread_mutex_lock(&g_streams_mu);
     const relay_stream_state_t *st = stream_in(slot);
     if (st) {
-        long long last_input_at = st->last_input_packet_at_ms;
+        long long last_input_at = st->last_input_packet_mono_ms;
         if (last_input_at <= 0) last_input_at = now;
         if (age_ms) *age_ms = now - last_input_at;
         result = 0;
@@ -119,7 +120,10 @@ void set_stream_retry_failures(int slot, int failures) {
 void record_stream_input_progress(int slot) {
     pthread_mutex_lock(&g_streams_mu);
     relay_stream_state_t *st = stream_in(slot);
-    if (st) st->last_input_packet_at_ms = now_ms();
+    if (st) {
+        st->last_input_packet_at_ms = wall_ms();
+        st->last_input_packet_mono_ms = now_ms();
+    }
     pthread_mutex_unlock(&g_streams_mu);
 }
 
@@ -130,7 +134,7 @@ void record_stream_forward_progress(int slot, int bytes) {
     if (st) {
         st->forwarded_packets++;
         st->forwarded_bytes += bytes;
-        st->last_packet_at_ms = now_ms();
+        st->last_packet_at_ms = wall_ms();
     }
     pthread_mutex_unlock(&g_streams_mu);
 }
