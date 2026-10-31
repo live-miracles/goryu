@@ -188,14 +188,14 @@ typedef struct known_key {
 } known_key_t;
 
 #define STRING_KEY(field)                                                                          \
-    {#field, 0, offsetof(file_config_t, field), sizeof(((file_config_t *)0)->field)}
-#define INT_KEY(field) {#field, 1, offsetof(file_config_t, field), 0}
+    #field, 0, offsetof(file_config_t, field), sizeof(((file_config_t *)0)->field)
+#define INT_KEY(field) #field, 1, offsetof(file_config_t, field), 0
 
 /* In the order they are checked, so the first problem reported is the first key's. */
 static const known_key_t KNOWN_KEYS[] = {
-    STRING_KEY(input_host),        INT_KEY(input_port),  STRING_KEY(output_host),
-    INT_KEY(output_port),          INT_KEY(status_port), STRING_KEY(passphrase),
-    STRING_KEY(output_passphrase),
+    {STRING_KEY(input_host)},        {INT_KEY(input_port)},  {STRING_KEY(output_host)},
+    {INT_KEY(output_port)},          {INT_KEY(status_port)}, {STRING_KEY(passphrase)},
+    {STRING_KEY(output_passphrase)},
 };
 #define KNOWN_KEY_COUNT (sizeof KNOWN_KEYS / sizeof KNOWN_KEYS[0])
 #define OUTPUT_PASSPHRASE_KEY (KNOWN_KEY_COUNT - 1) /* the only optional key */
