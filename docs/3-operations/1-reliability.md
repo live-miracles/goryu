@@ -81,6 +81,13 @@ startup. An earlier version ignored libsrt's refusal of a too-short passphrase, 
 a configured but invalid passphrase left the whole relay, input and output,
 running without encryption and accepting callers that sent none.
 
+The downstream connection's options are applied again on every connect, so a refusal
+there cannot stop the relay: that connect fails with `output socket: libsrt rejected
+option <name>` (the name, never the value), the stream's `lastError` says the same,
+and the connect is retried with the usual [backoff](#downstream-retry). This includes
+the streamid, which libsrt takes at 512 bytes at most: a longer one in the downstream
+URI, used for a publisher that sets none, used to be ignored and published to no stream.
+
 ## Status endpoint
 
 The status HTTP server runs on its own thread and binds to `127.0.0.1` only.

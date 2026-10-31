@@ -743,11 +743,36 @@ scenario_churn() {
         test "$(threads "$GPID")" -le $((threads_before + 1))
 }
 
+# libsrt takes a streamid of at most 512 bytes. The one in the downstream URI is what a
+# publisher without a streamid gets, and a longer one used to be refused by libsrt and
+# ignored by the relay, which then connected downstream with no streamid at all.
+scenario_long_output_streamid() {
+    ports 25
+    local long_id
+    long_id="$(printf 'x%.0s' $(seq 1 600))"
+    local in_uri="srt://127.0.0.1:$IN?mode=listener&groupconnect=1&transtype=live"
+    local out_uri="srt://127.0.0.1:$OUT?mode=caller&transtype=live&streamid=$long_id"
+    start_sink
+    SRT_BONDING_STATUS_PORT="$STATUS" LD_LIBRARY_PATH="$LIB_DIR" "$BIN" "$in_uri" "$out_uri" >"$WORK/g.log" 2>&1 &
+    GPID=$!
+    PIDS+=("$GPID")
+    wait_for 5 status
+    start_pub ""
+    check "the publisher is accepted" wait_for 10 status_has '.streamStates[0].inputActive == true'
+    check "the refused streamid is logged by name, not by value" wait_for 10 log_has "libsrt rejected option streamid" "$WORK/g.log"
+    check "the rejection line does not carry the streamid" bash -c \
+        "grep 'libsrt rejected option' '$WORK/g.log' | grep -qv 'xxxxxxxxxxxxxxxx'"
+    check "the relay does not connect downstream without it" status_has '.streamStates[0].outputConnected == false'
+    check "the failure is retried with backoff" wait_for 20 status_has '.streamStates[0].retryFailures >= 2'
+    check "the stream's lastError says why" status_has '.streamStates[0].lastError | contains("libsrt rejected option streamid")'
+    check "the relay is still alive" kill -0 "$GPID"
+}
+
 # --- run --------------------------------------------------------------------
 
 ALL=(cli bad_config unknown_key uri_mode output_passphrase forward downstream_down downstream_drops duplicate takeover two_streams passphrase sigterm
     status_idle_client shutdown_silent churn bonded bonded_legs bonded_flap bonded_backup bonded_duplicate bonded_takeover bonded_passphrase bonded_shutdown
-    bonded_abrupt_end)
+    bonded_abrupt_end long_output_streamid)
 SELECTED=("${@:-${ALL[@]}}")
 
 for name in "${SELECTED[@]}"; do

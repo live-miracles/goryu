@@ -55,22 +55,37 @@ static SRTSOCKET transport_open(char *err, size_t err_sz) {
     return sock;
 }
 
+/* A refused option fails the connect: the socket must not go downstream with an option
+ * that libsrt did not take (a streamid it refused would publish to no stream at all). */
+static int refuse_option(const char *opt_error, char *err, size_t err_sz) {
+    snprintf(err, err_sz, "output socket: %s", opt_error);
+    set_last_errorf("output socket: %s", opt_error);
+    relay_logf("output socket: %s\n", opt_error);
+    return -1;
+}
+
 static int transport_connect(SRTSOCKET sock, const output_target_t *target, const char *streamid,
                              char *err, size_t err_sz) {
-    SRT_TRANSTYPE tt = SRTT_LIVE;
-    srt_setsockflag(sock, SRTO_TRANSTYPE, &tt, sizeof tt);
     char opt_error[256];
+    SRT_TRANSTYPE tt = SRTT_LIVE;
+    if (set_srt_flag(sock, SRTO_TRANSTYPE, "transtype", &tt, sizeof tt, opt_error,
+                     sizeof opt_error) != 0) {
+        return refuse_option(opt_error, err, err_sz);
+    }
     if (apply_srt_opts(sock, target->out_query, opt_error, sizeof opt_error) != 0) {
-        snprintf(err, err_sz, "output socket: %s", opt_error);
-        set_last_errorf("output socket: %s", opt_error);
-        relay_logf("output socket: %s\n", opt_error);
-        return -1;
+        return refuse_option(opt_error, err, err_sz);
     }
 
-    if (streamid[0]) srt_setsockflag(sock, SRTO_STREAMID, streamid, (int)strlen(streamid));
+    if (streamid[0] && set_srt_flag(sock, SRTO_STREAMID, "streamid", streamid,
+                                    (int)strlen(streamid), opt_error, sizeof opt_error) != 0) {
+        return refuse_option(opt_error, err, err_sz);
+    }
 
     int cto = 3000;
-    srt_setsockflag(sock, SRTO_CONNTIMEO, &cto, sizeof cto);
+    if (set_srt_flag(sock, SRTO_CONNTIMEO, "conntimeo", &cto, sizeof cto, opt_error,
+                     sizeof opt_error) != 0) {
+        return refuse_option(opt_error, err, err_sz);
+    }
 
     if (srt_connect(sock, (struct sockaddr *)&target->out_addr, (int)target->out_addrlen) ==
         SRT_ERROR) {
