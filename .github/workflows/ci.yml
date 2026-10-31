@@ -7,6 +7,11 @@ on:
       - main
   pull_request:
   workflow_call:
+  workflow_dispatch:
+  schedule:
+    # Daily on the default branch, so a flaky end-to-end scenario or a drifted runner image
+    # shows up as a pattern across days and not only on whichever push hit it.
+    - cron: "17 3 * * *"
 
 jobs:
   format:

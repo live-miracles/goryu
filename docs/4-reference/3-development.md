@@ -96,8 +96,12 @@ a `streamStates` field and the pid of the process it started.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push to `master` or `main` and on pull
-requests:
+`.github/workflows/ci.yml` runs on every push to `master` or `main`, on pull
+requests, daily at 03:17 UTC on the default branch and on demand (`workflow_dispatch`).
+The daily run is there to catch a flaky scenario or a changed runner image without a
+push; a failure of the same scenario on several days is the sign of a flake, not of a
+change. GitHub pauses scheduled workflows after 60 days without repository activity.
+It runs:
 
 - **Format check:** `clang-format` over the C sources and tests. The version is pinned (21.1.8, installed with `pipx`) and `scripts/format.sh` refuses another major version, because 18 and 21 format macro braces differently and a mismatch fails CI for code that passes locally.
 - **Unit tests:** `scripts/test-unit.sh`.
