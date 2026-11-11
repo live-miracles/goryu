@@ -51,6 +51,32 @@ static double now_s(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/*
+ * Send one message, retrying briefly when libsrt reports the group as lost. Two nightly CI
+ * runs (bonded_legs, bonded_flap) ended with libsrt 1.5.6 logging "sendBroadcast: IPE:
+ * reported pending sockets, but EID is empty" and failing a send with a connection-lost
+ * error, which killed the caller although the relay was healthy. That was not reproduced
+ * locally (20 runs, idle and loaded), so this is a bounded workaround: a group that stays
+ * lost for SEND_RETRY_S is a real failure and the caller exits, as before.
+ */
+#define SEND_RETRY_S 2.0
+#define SEND_RETRY_PAUSE_US 20000
+
+static int send_message(SRTSOCKET group, const char *buf, int n) {
+    double first_failure = 0;
+    for (;;) {
+        if (srt_sendmsg2(group, buf, n, NULL) != SRT_ERROR) return 0;
+        if (srt_getlasterror(NULL) != SRT_ECONNLOST) return -1;
+        double t = now_s();
+        if (first_failure == 0) {
+            first_failure = t;
+            fprintf(stderr, "bonded_caller: send failed with connection lost, retrying\n");
+        }
+        if (t - first_failure >= SEND_RETRY_S) return -1;
+        usleep(SEND_RETRY_PAUSE_US);
+    }
+}
+
 static struct sockaddr_in make_addr(const char *ip, int port) {
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
@@ -212,7 +238,7 @@ int main(int argc, char **argv) {
 
         size_t n = fread(buf, 1, sizeof buf, stdin);
         if (n == 0) break;
-        if (srt_sendmsg2(group, buf, (int)n, NULL) == SRT_ERROR) die("srt_sendmsg2");
+        if (send_message(group, buf, (int)n) != 0) die("srt_sendmsg2");
         ++sent;
     }
     fprintf(stderr, "bonded_caller: sent %lld message(s)\n", sent);

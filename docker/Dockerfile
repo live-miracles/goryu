@@ -18,8 +18,8 @@ WORKDIR /dl
 RUN set -eux; \
     if [ "$GORYU_VERSION" = latest ]; then base=https://github.com/live-miracles/goryu/releases/latest/download; \
     else base=https://github.com/live-miracles/goryu/releases/download/$GORYU_VERSION; fi; \
-    curl -fsSL -o goryu-linux-x86_64.tar.gz "$base/goryu-linux-x86_64.tar.gz"; \
-    curl -fsSL -o checksums.sha256 "$base/checksums.sha256"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o goryu-linux-x86_64.tar.gz "$base/goryu-linux-x86_64.tar.gz"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o checksums.sha256 "$base/checksums.sha256"; \
     sha256sum --check checksums.sha256; \
     mkdir -p /opt/goryu; tar -xzf goryu-linux-x86_64.tar.gz -C /opt/goryu
 
