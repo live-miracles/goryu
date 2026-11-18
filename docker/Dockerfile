@@ -11,8 +11,14 @@ ARG BASE=ubuntu:22.04@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745b
 
 FROM ${BASE} AS fetch
 ARG GORYU_VERSION=latest
-RUN apt-get update -q \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl \
+# apt-get update exits 0 when a mirror cannot be resolved, so update and install retry together.
+RUN for i in 1 2 3 4 5; do \
+        apt-get update -q \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl \
+        && break; \
+        [ "$i" -lt 5 ] || exit 1; \
+        echo "apt attempt $i failed, retrying"; sleep $((i * 5)); \
+    done \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /dl
 RUN set -eux; \

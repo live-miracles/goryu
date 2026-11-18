@@ -46,11 +46,14 @@ trap cleanup EXIT
 # --- helpers ----------------------------------------------------------------
 
 check() { # check <description> <command...>
-    local desc="$1"; shift
-    if "$@" >/dev/null 2>&1; then
+    local desc="$1" err; shift
+    # stdout is dropped; stderr is kept and printed (first 5 lines) when the check fails, so
+    # a check can say which values it compared.
+    if err="$("$@" 2>&1 >/dev/null)"; then
         PASS=$((PASS + 1)); echo "  PASS  $desc"
     else
         FAIL=$((FAIL + 1)); FAILED+=("$CURRENT: $desc"); echo "  FAIL  $desc"
+        [[ -n "$err" ]] && printf '%s\n' "$err" | head -n 5 | cut -c1-600 | sed 's/^/  ! /'
         # The end-of-scenario dump comes after the session is gone, so the state a check saw
         # (a bonded leg still joining, say) is only visible here. The first failure is the
         # informative one; the later ones usually follow from it.
@@ -238,8 +241,12 @@ forwarded_once_not_per_leg() {
     local fwd total
     fwd="$(stream_jq "$1" .forwardedPackets)" || return 1
     total="$(legs_received "$1")" || return 1
+    if ((fwd * 10 < total * 7 && fwd * 10 > total * 3)); then return 0; fi
+    # One copy per leg would put forwarded near total/2; a leg that never carried data
+    # puts it near total. The per-leg counters tell those apart.
     echo "forwarded=$fwd legs_total=$total" >&2
-    ((fwd * 10 < total * 7 && fwd * 10 > total * 3))
+    stream_jq "$1" '[.input.legs[] | {ip, state, recvPacketsTotal, recvUniquePacketsTotal}] | tostring' >&2 || true
+    return 1
 }
 leg_count_is() { field_is "$1" '.input.legs|length' "$2"; }
 # Total packets the legs received, and the packets the relay forwarded.
@@ -547,9 +554,11 @@ scenario_bonded() {
     check "both legs are listed" wait_for 8 leg_count_is demo/bond 2
     check "each leg's arrival is logged" bash -c \
         "grep -q 'Bonded leg joined streamid=demo/bond leg=127.0.0.1:.* legs=' '$WORK/g.log' && grep -q 'Bonded leg joined streamid=demo/bond leg=127.0.0.2:.* legs=2' '$WORK/g.log'"
-    check "both legs are running" field_is demo/bond '[.input.legs[].state] | unique | join(",")' running
+    # Leg state and counters are sampled once a second, so a leg that has just joined can
+    # still read idle with no packets (seen on the Nov 16 nightly).
+    check "both legs are running" wait_for 5 field_is demo/bond '[.input.legs[].state] | unique | join(",")' running
     check "each leg has its own source address" field_is demo/bond '[.input.legs[].ip] | sort | join(",")' 127.0.0.1,127.0.0.2
-    check "each leg has received data" field_is demo/bond '[.input.legs[].recvUniquePacketsTotal > 0] | all' true
+    check "each leg has received data" wait_for 5 field_is demo/bond '[.input.legs[].recvUniquePacketsTotal > 0] | all' true
     check "each leg reports its RTT" field_is demo/bond '[.input.legs[].rttMs | type] | unique | join(",")' number
     check "latency is the negotiated 240 ms, derived from the legs" field_is demo/bond .input.latencyMs 240
     check "group-level bandwidth is null, as documented" field_is demo/bond '.input.bandwidthMbps == null' true

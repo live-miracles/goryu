@@ -42,5 +42,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: bash scripts/smoke-test.sh
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg jq
+      # apt-get update exits 0 when a mirror cannot be resolved, so update and install retry together.
+      - run: |
+          for i in 1 2 3 4 5; do
+            sudo apt-get update -q && sudo apt-get install -y -q ffmpeg jq && break
+            [ "$i" -lt 5 ] || exit 1
+            echo "apt attempt $i failed, retrying"; sleep $((i * 5))
+          done
       - run: bash scripts/test-e2e.sh

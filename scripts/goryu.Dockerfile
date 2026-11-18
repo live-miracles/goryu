@@ -6,16 +6,24 @@ ARG SRT_COMMIT=c63c311e88aa55e430e3b7d94b89d790994f88c4
 ARG RELAY_VERSION=dev
 
 # g++ is for building libsrt (cmake); goryu itself is C and is built with gcc below.
-RUN apt-get update -q \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-        build-essential \
-        ca-certificates \
-        cmake \
-        g++ \
-        git \
-        libssl-dev \
-        pkg-config \
-        tclsh \
+# apt-get update exits 0 when a mirror cannot be resolved (the Nov 11 nightly lost DNS for
+# archive.ubuntu.com and only the install failed), so update and install retry together,
+# at most 5 tries and 50 s of waiting.
+RUN for i in 1 2 3 4 5; do \
+        apt-get update -q \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+            build-essential \
+            ca-certificates \
+            cmake \
+            g++ \
+            git \
+            libssl-dev \
+            pkg-config \
+            tclsh \
+        && break; \
+        [ "$i" -lt 5 ] || exit 1; \
+        echo "apt attempt $i failed, retrying"; sleep $((i * 5)); \
+    done \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/srt
